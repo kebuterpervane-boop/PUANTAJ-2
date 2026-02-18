@@ -133,6 +133,17 @@ class Database:
         self.ensure_tersane_rules_schema()  # NEW: add per-tersane rule storage while keeping old global behavior intact.
         self.ensure_trash_schema()  # NEW: keep trash tables aligned with daily record schema.
         self.ensure_izin_backup_schema()  # NEW: keep pre-leave snapshot for safe leave delete/restore.
+        self.ensure_gunluk_kayit_batch_cols()  # NEW: import_batch_id gibi batch kolonlarını garantile.
+
+    def ensure_gunluk_kayit_batch_cols(self):
+        """gunluk_kayit tablosuna import_batch_id yoksa ekler. Migration versiyonundan bağımsız güvenli yol."""
+        with self.get_connection() as conn:
+            c = conn.cursor()
+            c.execute("PRAGMA table_info(gunluk_kayit)")
+            cols = [r[1] for r in c.fetchall()]
+            if 'import_batch_id' not in cols:
+                c.execute("ALTER TABLE gunluk_kayit ADD COLUMN import_batch_id TEXT DEFAULT NULL")
+            conn.commit()
 
     def _cache_key(self, tersane_id):
         """Cache anahtarı için tersane_id normalize edilir."""
@@ -507,8 +518,10 @@ class Database:
                 "gunluk_kayit": '''CREATE TABLE IF NOT EXISTS gunluk_kayit (
                                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                                     tarih TEXT, ad_soyad TEXT, giris_saati TEXT, cikis_saati TEXT,
-                                    kayip_sure_saat TEXT, hesaplanan_normal REAL, hesaplanan_mesai REAL, 
-                                    aciklama TEXT, UNIQUE(tarih, ad_soyad))''',
+                                    kayip_sure_saat TEXT, hesaplanan_normal REAL, hesaplanan_mesai REAL,
+                                    aciklama TEXT, import_batch_id TEXT DEFAULT NULL,
+                                    tersane_id INTEGER, firma_id INTEGER,
+                                    manuel_kilit INTEGER DEFAULT 0)''',
                 "resmi_tatiller": '''CREATE TABLE IF NOT EXISTS resmi_tatiller (
                                         tarih TEXT PRIMARY KEY, tur TEXT, normal_saat REAL, 
                                         mesai_saat REAL, aciklama TEXT)''',
@@ -572,8 +585,23 @@ class Database:
                                             ad_soyad TEXT, tur TEXT, tutar REAL, aciklama TEXT,
                                             batch_id INTEGER, deleted_at TEXT)''',
                 "trash_batches": '''CREATE TABLE IF NOT EXISTS trash_batches (
-                                    id INTEGER PRIMARY KEY AUTOINCREMENT, start_date TEXT, end_date TEXT, 
-                                    created_at TEXT, deleted_daily INTEGER DEFAULT 0, deleted_avans INTEGER DEFAULT 0)'''
+                                    id INTEGER PRIMARY KEY AUTOINCREMENT, start_date TEXT, end_date TEXT,
+                                    created_at TEXT, deleted_daily INTEGER DEFAULT 0, deleted_avans INTEGER DEFAULT 0)''',
+                "app_meta": '''CREATE TABLE IF NOT EXISTS app_meta (
+                                key   TEXT PRIMARY KEY,
+                                value TEXT)''',
+                "upload_batch_log_personel": '''CREATE TABLE IF NOT EXISTS upload_batch_log_personel (
+                                batch_id       TEXT,
+                                ad_soyad       TEXT,
+                                personel_id    INTEGER,
+                                old_firma_id   INTEGER,
+                                old_tersane_id INTEGER,
+                                old_ekip       TEXT,
+                                old_gorev      TEXT,
+                                old_ucret      REAL,
+                                old_durum      TEXT,
+                                changed_at     TEXT,
+                                PRIMARY KEY (batch_id, ad_soyad))'''
             }
             
             for sql in tables.values():
@@ -1290,13 +1318,21 @@ class Database:
         Bir yükleme batch'ini tamamen geri alır:
           1) Ay kilidi kontrolü
           2) import_batch_id=batch_id olan kayıtları trash'e taşı ve sil
-          3) Personel tersane_id'lerini snapshot'tan geri yükle
-        Döndürür: (True, trashed_count) veya (False, hata_mesajı)
+          3) Personel tersane_id'lerini snapshot'tan geri yükle (snapshot varsa)
+        Döndürür: (True, trashed_count, warning_or_none) veya (False, hata_mesajı, None)
         """
         try:
             with self.get_connection() as conn:
                 c = conn.cursor()
                 now = datetime.now().isoformat()
+
+                # 0) Snapshot varlık kontrolü — yoksa kayıtlar yine de silinir ama
+                #    personel tersane atamaları geri alınamaz (uyarı ile devam)
+                snap_count = c.execute(
+                    "SELECT COUNT(*) FROM upload_batch_log_personel WHERE batch_id=?",
+                    (batch_id,)
+                ).fetchone()[0]
+                has_snapshot = snap_count > 0
 
                 # 1) Ay kilidi kontrolü
                 if firma_id is not None:
@@ -1354,13 +1390,20 @@ class Database:
                 # 3) Sil
                 c.execute("DELETE FROM gunluk_kayit WHERE import_batch_id=?", (batch_id,))
 
-                # 4) Personel tersane_id'yi geri yükle
-                log_rows = c.execute(
-                    "SELECT ad_soyad, old_tersane_id FROM upload_batch_log_personel WHERE batch_id=?",
-                    (batch_id,)
-                ).fetchall()
-                for ad, old_tid in log_rows:
-                    c.execute("UPDATE personel SET tersane_id=? WHERE ad_soyad=?", (old_tid, ad))
+                # 4) Personel tersane_id'yi geri yükle (yalnızca snapshot varsa)
+                warning = None
+                if has_snapshot:
+                    log_rows = c.execute(
+                        "SELECT ad_soyad, old_tersane_id FROM upload_batch_log_personel WHERE batch_id=?",
+                        (batch_id,)
+                    ).fetchall()
+                    for ad, old_tid in log_rows:
+                        c.execute("UPDATE personel SET tersane_id=? WHERE ad_soyad=?", (old_tid, ad))
+                else:
+                    warning = (
+                        "Personel snapshot'ı bulunamadı — yükleme kayıtları silindi "
+                        "ancak personel tersane atamaları eski haline döndürülemedi."
+                    )
 
                 # 5) Log ve meta temizle
                 c.execute("DELETE FROM upload_batch_log_personel WHERE batch_id=?", (batch_id,))
@@ -1370,9 +1413,14 @@ class Database:
                 )
 
                 conn.commit()
-                return True, trashed
+                return True, trashed, warning
         except Exception as e:
-            return False, str(e)
+            try:
+                import logging
+                logging.exception("rollback_upload_batch_full başarısız (batch_id=%s): %s", batch_id, e)
+            except Exception:
+                pass
+            return False, str(e), None
 
     # --- AVANS VE DASHBOARD ---
 

@@ -1641,6 +1641,7 @@ class RecordsPage(QWidget):
                 team_fill = PatternFill(start_color='FFCFD8DC', end_color='FFCFD8DC', fill_type='solid')
                 section_fill = PatternFill(start_color='FFE1F5FE', end_color='FFE1F5FE', fill_type='solid')
                 currency_format = '#,##0.00 ₺'
+                person_sep = Side(border_style="medium", color="FF90A4AE")  # WHY: thick bottom border visually separates each employee block.
 
                 def _day_fill(day_num):
                     dt = datetime(year, month, day_num)
@@ -1756,7 +1757,7 @@ class RecordsPage(QWidget):
                             ws3.cell(row=row_normal, column=1).alignment = Alignment(horizontal='left', vertical='center')
                             ws3.cell(row=row_mesai, column=1).alignment = Alignment(horizontal='left', vertical='center')
                             ws3.cell(row=row_normal, column=1).border = Border(left=thin, right=thin, top=thin, bottom=thin)
-                            ws3.cell(row=row_mesai, column=1).border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                            ws3.cell(row=row_mesai, column=1).border = Border(left=thin, right=thin, top=thin, bottom=person_sep)
 
                             toplam_gun = 0
                             toplam_normal = 0.0
@@ -1791,7 +1792,8 @@ class RecordsPage(QWidget):
                                     fill = leave_fill_map[entry.get("izin_turu")]
                                 for cc in (c_norm, c_mes):
                                     cc.fill = fill
-                                    cc.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                                    bot = person_sep if cc is c_mes else thin
+                                    cc.border = Border(left=thin, right=thin, top=thin, bottom=bot)
                                     cc.alignment = Alignment(horizontal='center', vertical='center')
                                     if isinstance(cc.value, (int, float)):
                                         cc.number_format = '0.00'
@@ -1849,7 +1851,8 @@ class RecordsPage(QWidget):
                                 for c_idx in range(total_col, total_col + 6):
                                     cell = ws3.cell(row=r_idx, column=c_idx)
                                     cell.fill = total_fill
-                                    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                                    bot = person_sep if r_idx == row_mesai else thin
+                                    cell.border = Border(left=thin, right=thin, top=thin, bottom=bot)
                                     cell.alignment = Alignment(horizontal='center', vertical='center')
                                     if c_idx in (total_col + 2, total_col + 3, total_col + 4, total_col + 5):
                                         cell.number_format = currency_format
@@ -1868,16 +1871,24 @@ class RecordsPage(QWidget):
 
                     current_row += 1  # blank line between teams
 
-                # Column widths
-                ws3.column_dimensions['A'].width = 26
-                for d in range(1, days_in_month + 1):
-                    ws3.column_dimensions[get_column_letter(1 + d)].width = 4.5
-                ws3.column_dimensions[get_column_letter(total_col)].width = 11
-                ws3.column_dimensions[get_column_letter(total_col + 1)].width = 12
-                ws3.column_dimensions[get_column_letter(total_col + 2)].width = 11
-                ws3.column_dimensions[get_column_letter(total_col + 3)].width = 13
-                ws3.column_dimensions[get_column_letter(total_col + 4)].width = 12
-                ws3.column_dimensions[get_column_letter(total_col + 5)].width = 15
+                # Column widths — autofit (formüller ve gün sütunları hariç)
+                day_col_indices = set(range(2, 2 + days_in_month))
+                col_widths: dict[int, float] = {}
+                for _row in ws3.iter_rows():
+                    for _cell in _row:
+                        ci = _cell.column
+                        if ci in day_col_indices:
+                            col_widths[ci] = 4.5  # WHY: rotated header — narrow is correct.
+                            continue
+                        if _cell.value is None:
+                            continue
+                        val_str = str(_cell.value)
+                        if val_str.startswith('='):
+                            continue  # WHY: formula strings are arbitrarily long; skip them.
+                        col_widths[ci] = max(col_widths.get(ci, 8), len(val_str) + 2)
+                for ci, w in col_widths.items():
+                    ws3.column_dimensions[get_column_letter(ci)].width = min(w, 40)
+                ws3.column_dimensions['A'].width = max(col_widths.get(1, 26), 26)  # WHY: name column always at least 26.
 
                 ws3.freeze_panes = f"B{first_data_row or 4}"
 

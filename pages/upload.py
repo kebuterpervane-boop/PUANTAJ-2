@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
                              QDialog, QHBoxLayout, QComboBox, QDialogButtonBox,
                              QFormLayout, QTableWidget, QTableWidgetItem, QHeaderView,
                              QRadioButton, QButtonGroup, QFrame, QScrollArea,
-                             QLineEdit)
+                             QLineEdit, QListWidget, QListWidgetItem)
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QObject
 from PySide6.QtGui import QColor
@@ -37,7 +37,7 @@ class UploadWorker(QObject):
     finished = Signal(int)
     error = Signal(str)
 
-    def __init__(self, files, db_file, all_personel, settings_cache, skip_keys=None, firma_id=None, tersane_id=None, batch_id=None):
+    def __init__(self, files, db_file, all_personel, settings_cache, skip_keys=None, firma_id=None, tersane_id=None, batch_id=None, sheet_name=None, firma_filter_name=None, firma_col_name=None):
         super().__init__()
         self.files = files
         self.db_file = db_file  # WHY: pass file path instead of shared DB object to avoid cross-thread cache/conn sharing.
@@ -47,6 +47,9 @@ class UploadWorker(QObject):
         self.firma_id = firma_id
         self.tersane_id = tersane_id
         self.batch_id = batch_id  # WHY: tag each uploaded row for later rollback.
+        self.sheet_name = sheet_name
+        self.firma_filter_name = firma_filter_name
+        self.firma_col_name = firma_col_name  # WHY: kullanıcı dialog'dan sütun seçtiyse bunu kullan.
 
 
     @Slot()
@@ -67,6 +70,20 @@ class UploadWorker(QObject):
                 if df is None:
                     self.error.emit(f"<span style='color:#EF5350;'>HATA ({os.path.basename(fname)}): {error}</span>")
                     continue
+                # Firma filtresi: yalnizca secilen firmaya ait satirlari isle
+                if self.firma_filter_name:
+                    fc = None
+                    # Kullanıcı dialog'da sütun seçtiyse önce onu dene
+                    if self.firma_col_name and self.firma_col_name in df.columns:
+                        fc = self.firma_col_name
+                    else:
+                        for c in df.columns:
+                            cl = tr_lower(str(c)).strip()
+                            if cl in ('firma', 'firma adi', 'firma adı', 'sirket', 'şirket'):
+                                fc = c
+                                break
+                    if fc:
+                        df = df[df[fc].astype(str).str.strip().apply(tr_lower) == tr_lower(self.firma_filter_name).strip()].reset_index(drop=True)
                 try:
                     cols = {k: None for k in ['tarih', 'ad', 'giris', 'cikis', 'kayip']}
                     for c in df.columns:
@@ -169,7 +186,12 @@ class UploadWorker(QObject):
     def read_file_smart(self, fname):
         df = None
         try:
-            df = pd.read_excel(fname)
+            sheet = self.sheet_name
+            if isinstance(sheet, list):
+                dfs = [pd.read_excel(fname, sheet_name=s) for s in sheet]
+                df = pd.concat(dfs, ignore_index=True) if dfs else None
+            else:
+                df = pd.read_excel(fname, sheet_name=sheet if sheet is not None else 0)
         except Exception as e_xls:
             try:
                 df = pd.read_csv(fname)
@@ -536,9 +558,30 @@ class UploadPage(QWidget):
 
         import pandas as pd
         df = None
-        try:
-            df = pd.read_excel(path)
-        except Exception:
+        selected_sheet = 0  # default: ilk sheet
+
+        if path.lower().endswith(('.xlsx', '.xls')):
+            # Sheet listesini al; birden fazlaysa kullaniciya sec
+            try:
+                xl = pd.ExcelFile(path)
+                sheet_names = xl.sheet_names
+                if len(sheet_names) > 1:
+                    selected_sheet = self.select_sheet_dialog(sheet_names)
+                    if not selected_sheet:
+                        return
+                else:
+                    selected_sheet = [sheet_names[0]] if sheet_names else [0]
+            except Exception:
+                selected_sheet = [0]
+            try:
+                dfs = []
+                for s in selected_sheet:
+                    dfs.append(pd.read_excel(path, sheet_name=s))
+                df = pd.concat(dfs, ignore_index=True) if dfs else None
+            except Exception:
+                QMessageBox.warning(self, "Dosya Hatası", "Dosya okunamadı. Lütfen formatı kontrol edin.")
+                return
+        else:
             try:
                 df = pd.read_csv(path)
             except Exception:
@@ -547,6 +590,7 @@ class UploadPage(QWidget):
                 except Exception:
                     QMessageBox.warning(self, "Dosya Hatası", "Dosya okunamadı. Lütfen formatı kontrol edin.")
                     return
+
         if df is None or df.empty:
             QMessageBox.warning(self, "Dosya Hatası", "Dosya boş veya okunamadı.")
             return
@@ -568,6 +612,10 @@ class UploadPage(QWidget):
             if cl.strip() in ('firma', 'firma adi', 'firma adı', 'sirket', 'şirket'):
                 firma_col = c
                 break
+
+        # Otomatik bulunamadıysa kullanıcıya sor
+        if firma_col is None:
+            firma_col = self.select_firma_col_dialog(df)
 
         firma_id = None
         if firma_col is not None:
@@ -599,6 +647,25 @@ class UploadPage(QWidget):
 
         if not firma_id:
             return
+
+        # 3.1) Firma filtresi: df'yi yalnizca secilen firmaya ait satirlarla sinirla
+        firma_filter_name = None
+        if firma_col is not None:
+            all_firmalar = {fid: ad for fid, ad in self.db.get_firmalar()}
+            firma_filter_name = all_firmalar.get(firma_id)
+            if firma_filter_name:
+                before = len(df)
+                df = df[df[firma_col].astype(str).str.strip().apply(tr_lower) == tr_lower(firma_filter_name).strip()].reset_index(drop=True)
+                after = len(df)
+                if after == 0:
+                    QMessageBox.warning(self, "Firma Filtresi",
+                        f"'{firma_filter_name}' firmasına ait satır bulunamadı.\n"
+                        "Excel'deki firma adını kontrol edin.")
+                    return
+                if after < before:
+                    self.append_log(
+                        f"<span style='color:#90CAF9;'>Firma filtresi: {after}/{before} satır yükleniyor ({firma_filter_name}).</span>"
+                    )
 
         # 3.5) Tersane secimi
         tersane_id = self.select_tersane_dialog()
@@ -683,12 +750,21 @@ class UploadPage(QWidget):
                     if str(v).strip() and str(v).strip().lower() != 'nan'
                 ))
                 self.db.snapshot_personel_for_batch(batch_id, ad_list)
-            except Exception:
-                pass  # SAFEGUARD: snapshot failure must not block upload.
+            except Exception as _snap_err:
+                import logging
+                logging.exception("snapshot_personel_for_batch başarısız: %s", _snap_err)
+                QMessageBox.critical(
+                    self,
+                    "Yükleme İptal",
+                    "Personel snapshot'ı alınamadı — rollback güvenliği sağlanamaz.\n"
+                    "Yükleme iptal edildi.\n\n"
+                    f"Hata: {_snap_err}"
+                )
+                return
 
         # 8) Worker baslat (Thread yapisi AYNEN korunuyor)
         self.thread = QThread()
-        self.worker = UploadWorker(files, self.db.db_file, all_personel, settings_cache, skip_keys, firma_id, tersane_id, batch_id)
+        self.worker = UploadWorker(files, self.db.db_file, all_personel, settings_cache, skip_keys, firma_id, tersane_id, batch_id, sheet_name=selected_sheet, firma_filter_name=firma_filter_name, firma_col_name=firma_col)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress.setValue)
@@ -758,6 +834,116 @@ class UploadPage(QWidget):
                 seen.add(c)
                 unique_conflicts.append(c)
         return unique_conflicts
+
+    def select_sheet_dialog(self, sheet_names):
+        """Excel'deki sheet listesini gösterir, kullanıcı bir veya birden fazla seçer."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Sheet Seçimi")
+        dialog.setMinimumWidth(420)
+        vbox = QVBoxLayout(dialog)
+
+        lbl = QLabel(f"Excel'de {len(sheet_names)} sheet bulundu.\nYüklemek istediğiniz sheet'leri işaretleyin:")
+        lbl.setStyleSheet("font-weight: bold; font-size: 13px; margin-bottom: 8px;")
+        vbox.addWidget(lbl)
+
+        list_widget = QListWidget()
+        for name in sheet_names:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            list_widget.addItem(item)
+        # İlk sheet varsayılan olarak seçili gelsin
+        if list_widget.count() > 0:
+            list_widget.item(0).setCheckState(Qt.Checked)
+        vbox.addWidget(list_widget)
+
+        hint = QLabel("İpucu: Birden fazla sheet seçebilirsiniz — veriler birleştirilerek yüklenir.")
+        hint.setStyleSheet("color: #90CAF9; font-size: 11px; margin-top: 4px;")
+        vbox.addWidget(hint)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        vbox.addWidget(btns)
+        btns.accepted.connect(dialog.accept)
+        btns.rejected.connect(dialog.reject)
+
+        if dialog.exec() == QDialog.Accepted:
+            selected = [list_widget.item(i).text()
+                        for i in range(list_widget.count())
+                        if list_widget.item(i).checkState() == Qt.Checked]
+            if not selected:
+                return None
+            self.append_log(f"<span style='color:#90CAF9;'>Sheet(ler) seçildi: {', '.join(selected)}</span>")
+            return selected
+        return None
+
+    def select_firma_col_dialog(self, df):
+        """Firma sütunu otomatik bulunamadığında kullanıcının sütun seçmesini sağlar.
+        Döndürür: seçilen sütun adı (str) veya None ('Firma Sütunu Yok' seçildiyse)."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Firma Sütunu Seçimi")
+        dialog.setMinimumWidth(580)
+        dialog.setMinimumHeight(420)
+        vbox = QVBoxLayout(dialog)
+
+        lbl = QLabel(
+            "Firma sütunu otomatik bulunamadı.\n"
+            "Hangi sütun firma adını içeriyor? Seçmek için bir satıra tıklayın:"
+        )
+        lbl.setStyleSheet("font-weight: bold; font-size: 13px; margin-bottom: 8px;")
+        vbox.addWidget(lbl)
+
+        table = QTableWidget(len(df.columns), 2)
+        table.setHorizontalHeaderLabels(["Sütun Adı", "Örnek Değerler"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+
+        for i, col in enumerate(df.columns):
+            uniq = []
+            for v in df[col].dropna().astype(str):
+                v = v.strip()
+                if v and v.lower() != 'nan' and v not in uniq:
+                    uniq.append(v)
+                if len(uniq) >= 3:
+                    break
+            sample_str = ",  ".join(uniq) if uniq else "(boş)"
+            table.setItem(i, 0, QTableWidgetItem(str(col)))
+            table.setItem(i, 1, QTableWidgetItem(sample_str))
+
+        vbox.addWidget(table)
+
+        btn_row = QHBoxLayout()
+        btn_none = QPushButton("Firma Sütunu Yok")
+        btn_none.setStyleSheet("background-color: #757575; color: white; padding: 6px 18px;")
+        btn_use = QPushButton("Bu Sütunu Kullan")
+        btn_use.setStyleSheet(
+            "background-color: #2196F3; color: white; padding: 6px 18px; font-weight: bold;"
+        )
+        btn_row.addWidget(btn_none)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_use)
+        vbox.addLayout(btn_row)
+
+        selected_col = [None]
+
+        def on_use():
+            row_idx = table.currentRow()
+            if row_idx < 0:
+                QMessageBox.warning(dialog, "Seçim Yok", "Lütfen bir sütun seçin.")
+                return
+            selected_col[0] = df.columns[row_idx]
+            dialog.accept()
+
+        def on_none():
+            selected_col[0] = None
+            dialog.accept()
+
+        btn_use.clicked.connect(on_use)
+        btn_none.clicked.connect(on_none)
+        dialog.exec()
+        return selected_col[0]
 
     def select_firma_dialog(self, default_firma=None):
         rows = self.db.get_firmalar()
@@ -885,11 +1071,13 @@ class UploadPage(QWidget):
         )
         if reply != QMessageBox.Yes:
             return
-        ok, result = self.db.rollback_upload_batch_full(batch_id, firma_id=self._current_firma_id)
+        ok, result, warning = self.db.rollback_upload_batch_full(batch_id, firma_id=self._current_firma_id)
         if ok:
             self.append_log(
                 f"<span style='color:#66BB6A;'>Geri alma tamamlandi: {result} kayit trash'e taşındı.</span>"
             )
+            if warning:
+                self.append_log(f"<span style='color:#FFA726;'>⚠ {warning}</span>")
             self._current_batch_id = None
             self._current_firma_id = None
             self.btn_rollback.setEnabled(False)

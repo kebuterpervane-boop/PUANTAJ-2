@@ -340,6 +340,128 @@ def migration_007_upload_batch_infra(conn):
     conn.commit()
 
 
+def migration_008_ensure_import_batch_id(conn):
+    """Eski DB'lerde import_batch_id kolonu eksik kalabilir; güvenli şekilde ekle."""
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(gunluk_kayit)")
+    cols = [r[1] for r in cur.fetchall()]
+    if 'import_batch_id' not in cols:
+        cur.execute("ALTER TABLE gunluk_kayit ADD COLUMN import_batch_id TEXT DEFAULT NULL")
+    conn.commit()
+
+
+def migration_009_gunluk_kayit_unique_tersane_id(conn):
+    """
+    UNIQUE(tarih, ad_soyad) kısıtını UNIQUE(tarih, ad_soyad, COALESCE(tersane_id,-1))
+    expression index ile değiştirir.  Böylece farklı tersanelerdeki aynı isimli
+    personelin aynı tarihteki kaydı artık çakışmaz.
+
+    - Eski DB (inline UNIQUE var): çakışan satırlar dedupe_log'a alınır,
+      tablo inline-UNIQUE olmadan yeniden oluşturulur, index eklenir.
+    - Yeni DB (inline UNIQUE yok): sadece expression index eklenir.
+    - İdempotent: index zaten varsa hiçbir şey yapılmaz.
+    """
+    cur = conn.cursor()
+
+    # İdempotent kontrol: index zaten mevcutsa atla
+    if cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_gunluk_unique_tersane'"
+    ).fetchone():
+        conn.commit()
+        return
+
+    # Eski inline UNIQUE(tarih, ad_soyad) var mı?
+    row = cur.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='gunluk_kayit'"
+    ).fetchone()
+    table_sql = row[0] if row else ''
+    has_old_unique = 'UNIQUE(tarih, ad_soyad)' in table_sql
+
+    if has_old_unique:
+        # Dedupe log tablosu (savunma amaçlı; normalde bu tablo boş kalır)
+        cur.execute('''CREATE TABLE IF NOT EXISTS gunluk_kayit_dedupe_log (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            orig_id    INTEGER,
+            tarih      TEXT,
+            ad_soyad   TEXT,
+            tersane_id INTEGER,
+            reason     TEXT,
+            dedupe_at  TEXT
+        )''')
+
+        # Yeni anahtar (tarih, ad_soyad, COALESCE(tersane_id,-1)) açısından
+        # çakışan satırları bul — eski UNIQUE'in varlığı nedeniyle normalde boş olmalı
+        dup_rows = cur.execute('''
+            SELECT id, tarih, ad_soyad, tersane_id
+            FROM gunluk_kayit
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM gunluk_kayit
+                GROUP BY tarih, ad_soyad, COALESCE(tersane_id, -1)
+            )
+        ''').fetchall()
+
+        if dup_rows:
+            now = datetime.now().isoformat()
+            cur.executemany(
+                "INSERT INTO gunluk_kayit_dedupe_log "
+                "(orig_id, tarih, ad_soyad, tersane_id, reason, dedupe_at) "
+                "VALUES (?,?,?,?,'migration_009',?)",
+                [(r[0], r[1], r[2], r[3], now) for r in dup_rows]
+            )
+            cur.execute('''
+                DELETE FROM gunluk_kayit
+                WHERE id NOT IN (
+                    SELECT MAX(id)
+                    FROM gunluk_kayit
+                    GROUP BY tarih, ad_soyad, COALESCE(tersane_id, -1)
+                )
+            ''')
+
+        # Mevcut sütun listesini al
+        cur.execute("PRAGMA table_info(gunluk_kayit)")
+        existing_cols = [r[1] for r in cur.fetchall()]
+
+        # Yeni tablo: inline UNIQUE yok; tersane_id/firma_id/manuel_kilit dahil
+        cur.execute('''CREATE TABLE gunluk_kayit_new (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            tarih             TEXT,
+            ad_soyad          TEXT,
+            giris_saati       TEXT,
+            cikis_saati       TEXT,
+            kayip_sure_saat   TEXT,
+            hesaplanan_normal REAL,
+            hesaplanan_mesai  REAL,
+            aciklama          TEXT,
+            import_batch_id   TEXT DEFAULT NULL,
+            tersane_id        INTEGER,
+            firma_id          INTEGER,
+            manuel_kilit      INTEGER DEFAULT 0
+        )''')
+
+        # Her iki tabloda da mevcut olan sütunları kopyala
+        target_cols = [
+            'id', 'tarih', 'ad_soyad', 'giris_saati', 'cikis_saati',
+            'kayip_sure_saat', 'hesaplanan_normal', 'hesaplanan_mesai',
+            'aciklama', 'import_batch_id', 'tersane_id', 'firma_id', 'manuel_kilit'
+        ]
+        copy_cols = [c for c in target_cols if c in existing_cols]
+        col_sql = ', '.join(copy_cols)
+        cur.execute(
+            f"INSERT INTO gunluk_kayit_new ({col_sql}) SELECT {col_sql} FROM gunluk_kayit"
+        )
+
+        cur.execute("DROP TABLE gunluk_kayit")
+        cur.execute("ALTER TABLE gunluk_kayit_new RENAME TO gunluk_kayit")
+
+    # Expression index — hem eski hem yeni DB için
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_gunluk_unique_tersane "
+        "ON gunluk_kayit(tarih, ad_soyad, COALESCE(tersane_id, -1))"
+    )
+    conn.commit()
+
+
 # Ordered list of migrations
 MIGRATIONS = [
     migration_001_add_phone_to_personel,
@@ -349,4 +471,6 @@ MIGRATIONS = [
     migration_005_convert_rules_to_exit_time,
     migration_006_enforce_avans_kesinti_constraints,
     migration_007_upload_batch_infra,
+    migration_008_ensure_import_batch_id,
+    migration_009_gunluk_kayit_unique_tersane_id,
 ]
