@@ -1,0 +1,65 @@
+name: Build & Release EXE
+
+# Tetikleyici: "v" ile başlayan tag push'unda çalışır (örn: v3.0.2)
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      # 1) Kodu çek
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) Python kur
+      - name: Python kur (3.11)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # 3) Bağımlılıkları yükle
+      - name: Bağımlılıkları yükle
+        run: pip install -r requirements.txt
+
+      # 4) Portable EXE derle (tek dosya)
+      - name: PyInstaller - Portable EXE
+        run: pyinstaller SaralPuantaj_Portable.spec --noconfirm
+
+      # 5) Installer EXE (klasör yapısı → zip)
+      - name: PyInstaller - Installer Build
+        run: pyinstaller SaralPuantaj.spec --noconfirm
+
+      # 6) Installer klasörünü ZIP'le
+      - name: Installer klasörünü ZIP'le
+        run: |
+          Compress-Archive -Path dist\SaralPuantaj\* -DestinationPath dist\SaralPuantaj_Setup.zip
+        shell: pwsh
+
+      # 7) GitHub Release oluştur ve dosyaları yükle
+      - name: GitHub Release yayınla
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Saral Puantaj ${{ github.ref_name }}"
+          body: |
+            ## Saral Puantaj ${{ github.ref_name }}
+
+            ### İndirme Seçenekleri
+            | Dosya | Açıklama |
+            |-------|----------|
+            | `SaralPuantaj_Portable.exe` | Tek dosya — USB'den çalışır |
+            | `SaralPuantaj_Setup.zip` | Kurulum paketi — klasöre çıkarın |
+
+            ### Değişiklikler
+            CHANGELOG.md dosyasına bakın.
+          files: |
+            dist/SaralPuantaj_Portable.exe
+            dist/SaralPuantaj_Setup.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
