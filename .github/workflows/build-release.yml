@@ -6,6 +6,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write   # WHY: GitHub Release oluşturmak ve dosya yüklemek için gerekli.
+
 jobs:
   build-windows:
     runs-on: windows-latest
