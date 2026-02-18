@@ -2,13 +2,14 @@ from datetime import datetime
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
                              QTableWidgetItem, QHeaderView, QPushButton,
                              QLabel, QComboBox, QLineEdit, QDoubleSpinBox, QMessageBox, QDateEdit)
+from PySide6.QtGui import QColor
 from PySide6.QtCore import QThread, Signal, Slot, QObject  # NEW: threading helpers for smooth UI.
 from core.database import Database
 from core.input_validators import ensure_choice, ensure_non_empty, ensure_non_negative_number
 
 class AvansLoadWorker(QObject):
     """Avans verilerini arka planda yukler."""
-    finished = Signal(list, list)  # WHY: personnel_names, avans_records.
+    finished = Signal(list, list, list)  # WHY: personnel_names, avans_records, bakiye_rows.
     error = Signal(str)  # WHY: surface errors without blocking UI thread.
 
     def __init__(self, db, tersane_id=0, year=None, month=None):
@@ -23,7 +24,8 @@ class AvansLoadWorker(QObject):
         try:
             names = self.db.get_personnel_names_for_tersane(self.tersane_id, self.year, self.month)
             recs = self.db.get_avans_list(tersane_id=self.tersane_id)
-            self.finished.emit(names, recs)  # WHY: return data for UI update.
+            bakiye = self.db.get_avans_bakiye_ozeti(self.tersane_id)
+            self.finished.emit(names, recs, bakiye)  # WHY: return data for UI update.
         except Exception as e:
             self.error.emit(str(e))
 
@@ -104,6 +106,20 @@ class AvansPage(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("QTableWidget { background-color: #2b2b2b; color: white; alternate-background-color: #2a2a2a; }")
         layout.addWidget(self.table)
+
+        lbl_bakiye = QLabel("Kümülatif Avans Bakiyesi")
+        lbl_bakiye.setStyleSheet("font-weight: bold; color: #FFA726; margin-top: 6px;")
+        layout.addWidget(lbl_bakiye)
+
+        self.bakiye_table = QTableWidget()
+        self.bakiye_table.setColumnCount(4)
+        self.bakiye_table.setHorizontalHeaderLabels(["Personel", "Toplam Avans", "Toplam Kesinti", "Kalan Bakiye"])
+        self.bakiye_table.setFixedHeight(130)
+        self.bakiye_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.bakiye_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.bakiye_table.setAlternatingRowColors(True)
+        self.bakiye_table.setStyleSheet("QTableWidget { background-color: #1e1e1e; color: white; alternate-background-color: #2a2a2a; }")
+        layout.addWidget(self.bakiye_table)
 
         self.btn_del = QPushButton("Seçiliyi Sil")
         self.btn_del.clicked.connect(self.delete)
@@ -187,7 +203,7 @@ class AvansPage(QWidget):
         self._load_thread.finished.connect(self._load_thread.deleteLater)  # WHY: free thread object after finish.
         self._load_thread.start()  # WHY: start background work now that signals are wired.
 
-    def _on_load_finished(self, names, recs):
+    def _on_load_finished(self, names, recs, bakiye_rows):
         """Arka plan avans sonucunu tabloya uygular."""
         try:
             current = self.combo_pers.currentText()
@@ -207,6 +223,16 @@ class AvansPage(QWidget):
             locked = self.db.is_month_locked(y, m, self.aktif_firma_id)
             self.btn_save.setEnabled(not locked)
             self.btn_del.setEnabled(not locked)
+            # Bakiye özeti
+            self.bakiye_table.setRowCount(len(bakiye_rows))
+            for r, (ad, avans_t, kesinti_t, bakiye) in enumerate(bakiye_rows):
+                self.bakiye_table.setItem(r, 0, QTableWidgetItem(ad))
+                self.bakiye_table.setItem(r, 1, QTableWidgetItem(f"{avans_t:,.2f} ₺"))
+                self.bakiye_table.setItem(r, 2, QTableWidgetItem(f"{kesinti_t:,.2f} ₺"))
+                item = QTableWidgetItem(f"{bakiye:,.2f} ₺")
+                if bakiye > 0:
+                    item.setForeground(QColor("#FF6D00"))  # WHY: borç varsa turuncu — dikkat çekici.
+                self.bakiye_table.setItem(r, 3, item)
         except RuntimeError:
             pass  # SAFEGUARD: UI object may be gone; ignore late signals.
 

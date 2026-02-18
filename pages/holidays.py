@@ -2,7 +2,8 @@
 from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView,
-    QPushButton, QLabel, QComboBox, QLineEdit, QMessageBox, QFrame, QTextEdit, QDoubleSpinBox
+    QPushButton, QLabel, QComboBox, QLineEdit, QMessageBox, QFrame, QTextEdit, QDoubleSpinBox,
+    QInputDialog
 )
 from PySide6.QtCore import Qt
 from core.database import Database
@@ -107,6 +108,10 @@ class HolidaysPage(QWidget):
         self.btn_seed_defaults.clicked.connect(self.seed_default_holidays)
         btn_row.addWidget(self.btn_seed_defaults)
 
+        self.btn_nager = QPushButton("Nager.date API'den İndir")
+        self.btn_nager.clicked.connect(self.import_nager_holidays)
+        btn_row.addWidget(self.btn_nager)
+
         form.addLayout(btn_row)
         main.addWidget(form_frame, 3)
 
@@ -200,6 +205,39 @@ class HolidaysPage(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Veritabanı Hatası", f"Silinemedi: {e}")
             log_error(f"Tatil DB hatası: {e}")
+
+    def import_nager_holidays(self):
+        year, ok = QInputDialog.getInt(
+            self, "Yıl Seçin",
+            "Hangi yıl için Türkiye tatilleri indirilsin?",
+            datetime.now().year, 2020, 2035, 1
+        )
+        if not ok:
+            return
+        try:
+            import requests
+            url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/TR"
+            resp = requests.get(url, timeout=8)
+            resp.raise_for_status()
+            holidays = resp.json()
+        except Exception as e:
+            QMessageBox.critical(self, "Bağlantı Hatası", f"API'ye ulaşılamadı:\n{e}")
+            log_error(f"Nager.date API hatası: {e}")
+            return
+        if not holidays:
+            QMessageBox.information(self, "Bilgi", "API'den veri gelmedi.")
+            return
+        count = 0
+        for h in holidays:
+            try:
+                date_str = h.get("date", "")  # "2025-01-01" — YYYY-MM-DD, yıla özgü
+                name = h.get("localName") or h.get("name") or "Tatil"
+                self.db.add_holiday(date_str, "Resmi Tatil", 7.5, 0, name)
+                count += 1
+            except Exception:
+                pass  # WHY: tekrar ekleme veya format hatalarını atla.
+        self.load_holidays()
+        QMessageBox.information(self, "Başarılı", f"{year} yılı için {count} tatil eklendi.")
 
     def seed_default_holidays(self):
         reply = QMessageBox.question(

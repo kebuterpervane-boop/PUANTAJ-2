@@ -1445,6 +1445,27 @@ class Database:
             res = conn.execute("SELECT COALESCE(SUM(tutar), 0) FROM avans_kesinti WHERE ad_soyad=? AND tur='Avans'", (ad_soyad,)).fetchone()
             return res[0] or 0.0
 
+    def get_avans_bakiye_ozeti(self, tersane_id=None):
+        """Personel bazlı kümülatif avans bakiyesi: (ad_soyad, toplam_avans, toplam_kesinti, bakiye)."""
+        sql = (
+            "SELECT ad_soyad,"
+            " COALESCE(SUM(CASE WHEN tur='Avans' THEN tutar ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN tur='Kesinti' THEN tutar ELSE 0 END), 0),"
+            " COALESCE(SUM(CASE WHEN tur='Avans' THEN tutar ELSE -tutar END), 0)"
+            " FROM avans_kesinti"
+        )
+        params: list = []
+        if tersane_id and tersane_id > 0:
+            sql += " WHERE ad_soyad IN (SELECT DISTINCT ad_soyad FROM personel WHERE tersane_id=?)"
+            params.append(tersane_id)
+        sql += (
+            " GROUP BY ad_soyad"
+            " HAVING ROUND(COALESCE(SUM(CASE WHEN tur='Avans' THEN tutar ELSE -tutar END),0),2) != 0"
+            " ORDER BY 4 DESC"  # WHY: highest debt first.
+        )
+        with self.get_connection() as conn:
+            return conn.execute(sql, params).fetchall()
+
 
     def save_avans(self, tarih, ad, tur, tutar, aciklama, firma_id=None):
         if firma_id is not None:
