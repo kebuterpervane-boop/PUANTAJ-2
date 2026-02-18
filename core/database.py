@@ -824,6 +824,101 @@ class Database:
                 )
             conn.commit()
 
+    def seed_dini_tatiller(self, year: int) -> int:
+        """Belirtilen yıl için Ramazan/Kurban tatil tarihlerini ekler (Diyanet takvimi). Mevcut kayıtlar korunur."""
+        _DINI: dict[int, list[tuple]] = {
+            2024: [
+                ("2024-04-09", "Ramazan Bayramı Arefesi"),
+                ("2024-04-10", "Ramazan Bayramı 1. Günü"),
+                ("2024-04-11", "Ramazan Bayramı 2. Günü"),
+                ("2024-04-12", "Ramazan Bayramı 3. Günü"),
+                ("2024-06-16", "Kurban Bayramı Arefesi"),
+                ("2024-06-17", "Kurban Bayramı 1. Günü"),
+                ("2024-06-18", "Kurban Bayramı 2. Günü"),
+                ("2024-06-19", "Kurban Bayramı 3. Günü"),
+                ("2024-06-20", "Kurban Bayramı 4. Günü"),
+            ],
+            2025: [
+                ("2025-03-29", "Ramazan Bayramı Arefesi"),
+                ("2025-03-30", "Ramazan Bayramı 1. Günü"),
+                ("2025-03-31", "Ramazan Bayramı 2. Günü"),
+                ("2025-04-01", "Ramazan Bayramı 3. Günü"),
+                ("2025-06-05", "Kurban Bayramı Arefesi"),
+                ("2025-06-06", "Kurban Bayramı 1. Günü"),
+                ("2025-06-07", "Kurban Bayramı 2. Günü"),
+                ("2025-06-08", "Kurban Bayramı 3. Günü"),
+                ("2025-06-09", "Kurban Bayramı 4. Günü"),
+            ],
+            2026: [
+                ("2026-03-19", "Ramazan Bayramı Arefesi"),
+                ("2026-03-20", "Ramazan Bayramı 1. Günü"),
+                ("2026-03-21", "Ramazan Bayramı 2. Günü"),
+                ("2026-03-22", "Ramazan Bayramı 3. Günü"),
+                ("2026-05-26", "Kurban Bayramı Arefesi"),
+                ("2026-05-27", "Kurban Bayramı 1. Günü"),
+                ("2026-05-28", "Kurban Bayramı 2. Günü"),
+                ("2026-05-29", "Kurban Bayramı 3. Günü"),
+                ("2026-05-30", "Kurban Bayramı 4. Günü"),
+            ],
+            2027: [
+                ("2027-03-08", "Ramazan Bayramı Arefesi"),
+                ("2027-03-09", "Ramazan Bayramı 1. Günü"),
+                ("2027-03-10", "Ramazan Bayramı 2. Günü"),
+                ("2027-03-11", "Ramazan Bayramı 3. Günü"),
+                ("2027-05-15", "Kurban Bayramı Arefesi"),
+                ("2027-05-16", "Kurban Bayramı 1. Günü"),
+                ("2027-05-17", "Kurban Bayramı 2. Günü"),
+                ("2027-05-18", "Kurban Bayramı 3. Günü"),
+                ("2027-05-19", "Kurban Bayramı 4. Günü"),
+            ],
+            2028: [
+                ("2028-02-25", "Ramazan Bayramı Arefesi"),
+                ("2028-02-26", "Ramazan Bayramı 1. Günü"),
+                ("2028-02-27", "Ramazan Bayramı 2. Günü"),
+                ("2028-02-28", "Ramazan Bayramı 3. Günü"),
+                ("2028-05-04", "Kurban Bayramı Arefesi"),
+                ("2028-05-05", "Kurban Bayramı 1. Günü"),
+                ("2028-05-06", "Kurban Bayramı 2. Günü"),
+                ("2028-05-07", "Kurban Bayramı 3. Günü"),
+                ("2028-05-08", "Kurban Bayramı 4. Günü"),
+            ],
+            2029: [
+                ("2029-02-13", "Ramazan Bayramı Arefesi"),
+                ("2029-02-14", "Ramazan Bayramı 1. Günü"),
+                ("2029-02-15", "Ramazan Bayramı 2. Günü"),
+                ("2029-02-16", "Ramazan Bayramı 3. Günü"),
+                ("2029-04-23", "Kurban Bayramı Arefesi"),
+                ("2029-04-24", "Kurban Bayramı 1. Günü"),
+                ("2029-04-25", "Kurban Bayramı 2. Günü"),
+                ("2029-04-26", "Kurban Bayramı 3. Günü"),
+                ("2029-04-27", "Kurban Bayramı 4. Günü"),
+            ],
+            2030: [
+                ("2030-02-02", "Ramazan Bayramı Arefesi"),
+                ("2030-02-03", "Ramazan Bayramı 1. Günü"),
+                ("2030-02-04", "Ramazan Bayramı 2. Günü"),
+                ("2030-02-05", "Ramazan Bayramı 3. Günü"),
+                ("2030-04-12", "Kurban Bayramı Arefesi"),
+                ("2030-04-13", "Kurban Bayramı 1. Günü"),
+                ("2030-04-14", "Kurban Bayramı 2. Günü"),
+                ("2030-04-15", "Kurban Bayramı 3. Günü"),
+                ("2030-04-16", "Kurban Bayramı 4. Günü"),
+            ],
+        }
+        rows = _DINI.get(year, [])
+        if not rows:
+            return 0
+        count = 0
+        with self.get_connection() as conn:
+            for tarih, aciklama in rows:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO resmi_tatiller (tarih, tur, normal_saat, mesai_saat, aciklama) VALUES (?,?,?,?,?)",
+                    (tarih, "Resmi Tatil", 7.5, 0, aciklama),
+                )
+                count += cur.rowcount
+            conn.commit()
+        return count  # WHY: caller shows how many were actually inserted (0 if all already existed).
+
     # --- PERFORMANS VE HESAPLAMA ---
 
     def update_records_for_holiday(self, tarih):

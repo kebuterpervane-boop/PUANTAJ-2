@@ -112,6 +112,10 @@ class HolidaysPage(QWidget):
         self.btn_nager.clicked.connect(self.import_nager_holidays)
         btn_row.addWidget(self.btn_nager)
 
+        self.btn_dini = QPushButton("Dini Tatilleri Yükle")
+        self.btn_dini.clicked.connect(self.seed_dini_tatil_yil)
+        btn_row.addWidget(self.btn_dini)
+
         form.addLayout(btn_row)
         main.addWidget(form_frame, 3)
 
@@ -238,6 +242,25 @@ class HolidaysPage(QWidget):
                 pass  # WHY: tekrar ekleme veya format hatalarını atla.
         self.load_holidays()
         QMessageBox.information(self, "Başarılı", f"{year} yılı için {count} tatil eklendi.")
+
+    def seed_dini_tatil_yil(self):
+        year, ok = QInputDialog.getInt(
+            self, "Yıl Seçin",
+            "Hangi yıl için Ramazan/Kurban tarihleri yüklensin?\n(2024–2030 destekleniyor)",
+            datetime.now().year, 2024, 2030, 1
+        )
+        if not ok:
+            return
+        try:
+            count = self.db.seed_dini_tatiller(year)
+            self.load_holidays()
+            if count == 0:
+                QMessageBox.information(self, "Bilgi", f"{year} yılı dini tatilleri zaten mevcut.")
+            else:
+                QMessageBox.information(self, "Başarılı", f"{year} yılı için {count} dini tatil eklendi.")
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Eklenemedi: {e}")
+            log_error(f"Dini tatil seed hatası: {e}")
 
     def seed_default_holidays(self):
         reply = QMessageBox.question(
