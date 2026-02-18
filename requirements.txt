@@ -1,0 +1,9 @@
+PySide6>=6.5.0
+openpyxl>=3.1.0
+pyinstaller>=6.0.0
+pandas
+reportlab
+xlsxwriter
+requests
+pillow
+bcrypt>=4.0.0

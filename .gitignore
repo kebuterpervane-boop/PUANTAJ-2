@@ -1,0 +1,17 @@
+puantaj.db
+__pycache__/
+backups/
+migrations_backups/
+pdf_output/
+build/
+dist/
+.vscode/
+.claude/
+PUANTAJ-APP-2.0/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
