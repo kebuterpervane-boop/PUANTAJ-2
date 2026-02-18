@@ -216,6 +216,21 @@ class SettingsPage(QWidget):
         h_ara_mola.addWidget(self.combo_fiili_yuvarlama)
         p_layout.addLayout(h_ara_mola)
 
+        # Cuma kayıp toleransı
+        h_cuma = QHBoxLayout()
+        h_cuma.addWidget(QLabel("Cuma Kayip Toleransi (Saat):"))
+        self.input_cuma_tolerans = QDoubleSpinBox()
+        self.input_cuma_tolerans.setRange(0.0, 4.0)
+        self.input_cuma_tolerans.setSingleStep(0.25)
+        self.input_cuma_tolerans.setDecimals(2)
+        self.input_cuma_tolerans.setToolTip("Cuma gunleri bu sureden az kayip sureye ceza uygulanmaz (orn: 1.0 saat = 60 dk).")
+        try:
+            self.input_cuma_tolerans.setValue(float(self.db.get_setting("friday_loss_tolerance_hours", 1.0)))
+        except (ValueError, TypeError):
+            self.input_cuma_tolerans.setValue(1.0)
+        h_cuma.addWidget(self.input_cuma_tolerans)
+        p_layout.addLayout(h_cuma)
+
         # Salary basis controls
         h2 = QHBoxLayout()
         h2.addWidget(QLabel("Maaş Bazı:"))
@@ -513,6 +528,11 @@ class SettingsPage(QWidget):
                 self.combo_fiili_yuvarlama.setCurrentIndex(2)
             else:
                 self.combo_fiili_yuvarlama.setCurrentIndex(0)
+            cuma_tolerans = self.db.get_tersane_setting("friday_loss_tolerance_hours", 1.0, tid, fallback_global=True)
+            try:
+                self.input_cuma_tolerans.setValue(float(cuma_tolerans))
+            except (ValueError, TypeError):
+                self.input_cuma_tolerans.setValue(1.0)
             # NEW: update active tersane label for clarity.
             if hasattr(self, "lbl_active_tersane"):
                 if tid > 0:
@@ -600,18 +620,22 @@ class SettingsPage(QWidget):
             yuvarlama_modu = yuvarlama_map.get(self.combo_fiili_yuvarlama.currentIndex(), "ondalik")
             ara_mola = int(self.input_ara_mola_dk.value())
 
+            cuma_tolerans_val = round(self.input_cuma_tolerans.value(), 2)
+
             if target_tid > 0:
                 self.db.update_tersane_setting(target_tid, "calisma_hesaplama_modu", calisma_modu)
                 self.db.update_tersane_setting(target_tid, "ogle_molasi_baslangic", ogle_baslangic or "12:15")
                 self.db.update_tersane_setting(target_tid, "ogle_molasi_bitis", ogle_bitis or "13:15")
                 self.db.update_tersane_setting(target_tid, "ara_mola_dk", ara_mola)
                 self.db.update_tersane_setting(target_tid, "fiili_saat_yuvarlama", yuvarlama_modu)
+                self.db.update_tersane_setting(target_tid, "friday_loss_tolerance_hours", cuma_tolerans_val)  # WHY: tersane bazlı Cuma toleransı.
             else:
                 self.db.update_setting("calisma_hesaplama_modu", calisma_modu)
                 self.db.update_setting("ogle_molasi_baslangic", ogle_baslangic or "12:15")
                 self.db.update_setting("ogle_molasi_bitis", ogle_bitis or "13:15")
                 self.db.update_setting("ara_mola_dk", ara_mola)
                 self.db.update_setting("fiili_saat_yuvarlama", yuvarlama_modu)
+                self.db.update_setting("friday_loss_tolerance_hours", cuma_tolerans_val)  # WHY: global Cuma toleransı.
             
             # salary settings
             basis_text = self.combo_salary_basis.currentText()

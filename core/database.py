@@ -59,11 +59,6 @@ def _check_bcrypt(password, hashed):
         return False
 
 class Database:
-    # NEW: process-level RAM cache to reduce repeated reads (safe, non-persistent).
-    _mem_cache = {  # WHY: speeds up UI reads without changing any storage or logic.
-        'settings_cache': {},  # key: tersane_id (int) -> cached dict
-        'personnel_list': {},  # key: tersane_id (int) -> cached list
-    }
     _init_lock = threading.RLock()  # WHY: protect one-time schema bootstrap from concurrent page/thread starts.
     _initialized_db_files = set()  # WHY: avoid rerunning heavy init/migrations for same DB in one process.
     # --- AY KİLİT API ---
@@ -94,12 +89,17 @@ class Database:
             )
             conn.commit()
 
-    def __init__(self, db_file=None):
+    def __init__(self, db_file=None, use_cache=True):
         if db_file is None:
             db_file = str(get_default_db_path())
             relocate_old_db_if_present(Path(db_file))
         self.db_file = str(db_file)
         self.current_firma_id = 1  # Varsayılan firma ID.
+        self._use_cache = use_cache  # WHY: worker threads create DB(use_cache=False) to avoid shared cache mutation.
+        self._mem_cache = {  # WHY: instance-level cache prevents cross-thread cache sharing.
+            'settings_cache': {},
+            'personnel_list': {},
+        }
         self._ensure_schema_initialized()
 
     @staticmethod
@@ -145,12 +145,16 @@ class Database:
     def _get_cached(self, group, tersane_id):
         """Cache'den okuma (yoksa None)."""
         # WHY: centralizes cache access to keep behavior consistent.
+        if not self._use_cache:
+            return None  # WHY: worker DB instances skip cache to avoid sharing mutable state.
         key = self._cache_key(tersane_id)
         return self._mem_cache.get(group, {}).get(key)
 
     def _set_cached(self, group, tersane_id, value):
         """Cache'e yazma."""
         # WHY: centralizes cache write to avoid repetitive dict handling.
+        if not self._use_cache:
+            return  # WHY: worker DB instances do not populate cache.
         key = self._cache_key(tersane_id)
         self._mem_cache.setdefault(group, {})[key] = value
 
@@ -392,6 +396,13 @@ class Database:
     def get_tersane_ayarlari_for_hesaplama(self, tersane_id):
         """Hesaplama motoru için tersane saat ayarlarını dakika cinsinden döndürür."""
         tersane = self.get_tersane(tersane_id)
+        # Cuma toleransı: tersane ayarından oku (saat → dakika)
+        try:
+            friday_h = float(self.get_tersane_setting("friday_loss_tolerance_hours", 1.0, tersane_id, fallback_global=True))
+        except (ValueError, TypeError):
+            friday_h = 1.0
+        cuma_dk = max(0, int(friday_h * 60))
+
         if not tersane:
             # Varsayılan değerler
             return {
@@ -400,6 +411,7 @@ class Database:
                 'erken_cikis_limit_dk': 16 * 60 + 30,
                 'tolerans_limiti_dk': 17 * 60 + 30,
                 'vardiya_limiti_dk': 19 * 60 + 30,
+                'cuma_kayip_tolerans_dk': cuma_dk,  # WHY: settings'ten gelen Cuma toleransı.
             }
         def time_to_minutes(t_str, default_dk):
             try:
@@ -413,6 +425,7 @@ class Database:
             'erken_cikis_limit_dk': time_to_minutes(tersane['erken_cikis_limit'], 990),
             'tolerans_limiti_dk': time_to_minutes(tersane['mesai_baslangic'], 1050),
             'vardiya_limiti_dk': time_to_minutes(tersane['vardiya_limit'], 1170),
+            'cuma_kayip_tolerans_dk': cuma_dk,  # WHY: tersane bazlı Cuma kayıp toleransı (dakika).
         }
 
     def ensure_company_schema(self):
@@ -661,7 +674,8 @@ class Database:
                     'ogle_molasi_baslangic': self.get_tersane_setting("ogle_molasi_baslangic", "12:15", tersane_id, fallback_global=fallback_global),
                     'ogle_molasi_bitis': self.get_tersane_setting("ogle_molasi_bitis", "13:15", tersane_id, fallback_global=fallback_global),
                     'ara_mola_dk': self.get_tersane_setting("ara_mola_dk", "20", tersane_id, fallback_global=fallback_global),
-                    'fiili_saat_yuvarlama': self.get_tersane_setting("fiili_saat_yuvarlama", "ondalik", tersane_id, fallback_global=fallback_global)
+                    'fiili_saat_yuvarlama': self.get_tersane_setting("fiili_saat_yuvarlama", "ondalik", tersane_id, fallback_global=fallback_global),
+                    'friday_loss_tolerance_hours': self.get_tersane_setting("friday_loss_tolerance_hours", "1.0", tersane_id, fallback_global=fallback_global),  # WHY: tersane bazlı Cuma toleransı (saat).
                 }
                 # NEW: tersane saatleri hesaplama motoru için eklenir.
                 rules['tersane_saatleri'] = self.get_tersane_ayarlari_for_hesaplama(tersane_id)
@@ -677,7 +691,8 @@ class Database:
                 'ogle_molasi_baslangic': self.get_setting("ogle_molasi_baslangic", "12:15"),
                 'ogle_molasi_bitis': self.get_setting("ogle_molasi_bitis", "13:15"),
                 'ara_mola_dk': self.get_setting("ara_mola_dk", "20"),
-                'fiili_saat_yuvarlama': self.get_setting("fiili_saat_yuvarlama", "ondalik")
+                'fiili_saat_yuvarlama': self.get_setting("fiili_saat_yuvarlama", "ondalik"),
+                'friday_loss_tolerance_hours': self.get_setting("friday_loss_tolerance_hours", "1.0"),  # WHY: global Cuma toleransı (saat).
             }
         except Exception:
             # SAFEGUARD: return minimal defaults if something goes wrong.
@@ -691,7 +706,8 @@ class Database:
                 'ogle_molasi_baslangic': "12:15",
                 'ogle_molasi_bitis': "13:15",
                 'ara_mola_dk': "20",
-                'fiili_saat_yuvarlama': "ondalik"
+                'fiili_saat_yuvarlama': "ondalik",
+                'friday_loss_tolerance_hours': "1.0",
             }
 
     def get_settings_cache(self, tersane_id=None, use_cache=True):
@@ -1217,6 +1233,146 @@ class Database:
             c.execute("DELETE FROM trash_batches WHERE id=?", (batch_id,))
             conn.commit()
             return rd, ra
+
+    # --- UPLOAD BATCH ROLLBACK ---
+
+    def get_last_upload_batch_id(self):
+        """Son yükleme batch_id'sini app_meta'dan döndürür."""
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute(
+                    "SELECT value FROM app_meta WHERE key='last_upload_batch_id'"
+                ).fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
+
+    def set_last_upload_batch_id(self, batch_id):
+        """Son yükleme batch_id'sini app_meta'ya kaydeder."""
+        try:
+            with self.get_connection() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('last_upload_batch_id', ?)",
+                    (batch_id,)
+                )
+                conn.commit()
+        except Exception:
+            pass  # SAFEGUARD: metadata write failure must not block the UI.
+
+    def snapshot_personel_for_batch(self, batch_id, ad_soyad_list):
+        """Yükleme öncesi personel tersane/firma bilgisini log tablosuna kaydeder."""
+        if not ad_soyad_list:
+            return
+        changed_at = datetime.now().isoformat()
+        rows = []
+        with self.get_connection() as conn:
+            for ad in ad_soyad_list:
+                row = conn.execute(
+                    "SELECT firma_id, tersane_id FROM personel WHERE ad_soyad=?", (ad,)
+                ).fetchone()
+                rows.append((
+                    batch_id, ad,
+                    row[0] if row else None,   # old_firma_id
+                    row[1] if row else None,   # old_tersane_id
+                    changed_at
+                ))
+            if rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO upload_batch_log_personel "
+                    "(batch_id, ad_soyad, old_firma_id, old_tersane_id, changed_at) "
+                    "VALUES (?,?,?,?,?)",
+                    rows
+                )
+                conn.commit()
+
+    def rollback_upload_batch_full(self, batch_id, firma_id=None):
+        """
+        Bir yükleme batch'ini tamamen geri alır:
+          1) Ay kilidi kontrolü
+          2) import_batch_id=batch_id olan kayıtları trash'e taşı ve sil
+          3) Personel tersane_id'lerini snapshot'tan geri yükle
+        Döndürür: (True, trashed_count) veya (False, hata_mesajı)
+        """
+        try:
+            with self.get_connection() as conn:
+                c = conn.cursor()
+                now = datetime.now().isoformat()
+
+                # 1) Ay kilidi kontrolü
+                if firma_id is not None:
+                    ay_rows = c.execute(
+                        "SELECT DISTINCT CAST(strftime('%Y', tarih) AS INTEGER), "
+                        "CAST(strftime('%m', tarih) AS INTEGER) "
+                        "FROM gunluk_kayit WHERE import_batch_id=?",
+                        (batch_id,)
+                    ).fetchall()
+                    for y, m in ay_rows:
+                        if self.is_month_locked(y, m, firma_id):
+                            return False, f"{y}-{m:02d} ayı kilitlidir; rollback yapılamaz."
+
+                # 2) gunluk_kayit → trash
+                c.execute("PRAGMA table_info(gunluk_kayit_trash)")
+                trash_cols = {r[1] for r in c.fetchall()}
+                c.execute("PRAGMA table_info(gunluk_kayit)")
+                src_cols = {r[1] for r in c.fetchall()}
+                has_extra = all(
+                    col in trash_cols and col in src_cols
+                    for col in ("tersane_id", "firma_id", "manuel_kilit")
+                )
+
+                c.execute(
+                    "INSERT INTO trash_batches (start_date, end_date, created_at) VALUES (?, ?, ?)",
+                    (batch_id, batch_id, now)
+                )
+                tbid = c.lastrowid
+
+                if has_extra:
+                    c.execute(
+                        "INSERT INTO gunluk_kayit_trash "
+                        "(orig_id, tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, "
+                        "hesaplanan_normal, hesaplanan_mesai, aciklama, tersane_id, firma_id, "
+                        "manuel_kilit, batch_id, deleted_at) "
+                        "SELECT id, tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, "
+                        "hesaplanan_normal, hesaplanan_mesai, aciklama, tersane_id, firma_id, "
+                        "COALESCE(manuel_kilit, 0), ?, ? "
+                        "FROM gunluk_kayit WHERE import_batch_id=?",
+                        (tbid, now, batch_id)
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO gunluk_kayit_trash "
+                        "(orig_id, tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, "
+                        "hesaplanan_normal, hesaplanan_mesai, aciklama, batch_id, deleted_at) "
+                        "SELECT id, tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, "
+                        "hesaplanan_normal, hesaplanan_mesai, aciklama, ?, ? "
+                        "FROM gunluk_kayit WHERE import_batch_id=?",
+                        (tbid, now, batch_id)
+                    )
+                trashed = c.rowcount
+                c.execute("UPDATE trash_batches SET deleted_daily=? WHERE id=?", (trashed, tbid))
+
+                # 3) Sil
+                c.execute("DELETE FROM gunluk_kayit WHERE import_batch_id=?", (batch_id,))
+
+                # 4) Personel tersane_id'yi geri yükle
+                log_rows = c.execute(
+                    "SELECT ad_soyad, old_tersane_id FROM upload_batch_log_personel WHERE batch_id=?",
+                    (batch_id,)
+                ).fetchall()
+                for ad, old_tid in log_rows:
+                    c.execute("UPDATE personel SET tersane_id=? WHERE ad_soyad=?", (old_tid, ad))
+
+                # 5) Log ve meta temizle
+                c.execute("DELETE FROM upload_batch_log_personel WHERE batch_id=?", (batch_id,))
+                c.execute(
+                    "DELETE FROM app_meta WHERE key='last_upload_batch_id' AND value=?",
+                    (batch_id,)
+                )
+
+                conn.commit()
+                return True, trashed
+        except Exception as e:
+            return False, str(e)
 
     # --- AVANS VE DASHBOARD ---
 

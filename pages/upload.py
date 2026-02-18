@@ -37,20 +37,23 @@ class UploadWorker(QObject):
     finished = Signal(int)
     error = Signal(str)
 
-    def __init__(self, files, db, all_personel, settings_cache, skip_keys=None, firma_id=None, tersane_id=None):
+    def __init__(self, files, db_file, all_personel, settings_cache, skip_keys=None, firma_id=None, tersane_id=None, batch_id=None):
         super().__init__()
         self.files = files
-        self.db = db
+        self.db_file = db_file  # WHY: pass file path instead of shared DB object to avoid cross-thread cache/conn sharing.
         self.all_personel = all_personel
         self.settings_cache = settings_cache
         self.skip_keys = skip_keys or set()
         self.firma_id = firma_id
         self.tersane_id = tersane_id
+        self.batch_id = batch_id  # WHY: tag each uploaded row for later rollback.
 
 
     @Slot()
     def run(self):
         import logging
+        from core.database import Database as _DB
+        db = _DB(self.db_file, use_cache=False)  # WHY: thread-local DB instance; use_cache=False avoids shared cache mutation.
         total_saved = 0
         skipped_count = 0
         try:
@@ -107,15 +110,15 @@ class UploadWorker(QObject):
                             cikis = normalize_time_cell(row[1].get(cols['cikis']))
                             kayip = normalize_time_cell(row[1].get(cols['kayip']))
                             p_inf = self.all_personel.get(ad, {'yevmiyeci': 0, 'ozel_durum': None})
-                            h_info = self.db.get_holiday_info(tarih_str)
+                            h_info = db.get_holiday_info(tarih_str)
                             h_set = {tarih_str} if h_info else set()
                             normal, mesai, notlar = hesapla_hakedis(
                                 tarih_str, giris, cikis, kayip, h_set,
-                                self.db.get_holiday_info, lambda x: p_inf['ozel_durum'],
-                                ad, p_inf['yevmiyeci'], db=self.db,
+                                db.get_holiday_info, lambda x: p_inf['ozel_durum'],
+                                ad, p_inf['yevmiyeci'], db=db,
                                 settings_cache=self.settings_cache.get('shipyard_rules', self.settings_cache) if self.settings_cache else None  # NEW: shipyard_rules dict.
                             )
-                            batch_data.append((tarih_str, ad, giris, cikis, kayip, normal, mesai, notlar, self.firma_id, self.tersane_id))
+                            batch_data.append((tarih_str, ad, giris, cikis, kayip, normal, mesai, notlar, self.firma_id, self.tersane_id, self.batch_id))
                             if i % 50 == 0 and row_count > 0:
                                 self.progress.emit(int((i / row_count) * 100))
                         except Exception as e:
@@ -124,16 +127,24 @@ class UploadWorker(QObject):
                             continue
                     if batch_data:
                         try:
-                            with self.db.get_connection() as conn:
+                            with db.get_connection() as conn:
                                 conn.execute("PRAGMA journal_mode=WAL;")
                                 conn.execute("PRAGMA synchronous=NORMAL;")
-                                conn.executemany("INSERT OR REPLACE INTO gunluk_kayit (tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, hesaplanan_normal, hesaplanan_mesai, aciklama, firma_id, tersane_id) VALUES (?,?,?,?,?,?,?,?,?,?)", batch_data)
+                                conn.executemany(
+                                    "INSERT OR REPLACE INTO gunluk_kayit "
+                                    "(tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, "
+                                    "hesaplanan_normal, hesaplanan_mesai, aciklama, firma_id, tersane_id, import_batch_id) "
+                                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                                    batch_data
+                                )
                                 # Personelleri secilen tersane ile iliskilendir
                                 if self.tersane_id:
                                     personel_adlari = list(set(row[1] for row in batch_data))
                                     for ad in personel_adlari:
-                                        conn.execute("UPDATE personel SET tersane_id=? WHERE ad_soyad=? AND (tersane_id IS NULL OR tersane_id != ?)",
-                                                     (self.tersane_id, ad, self.tersane_id))
+                                        conn.execute(
+                                            "UPDATE personel SET tersane_id=? WHERE ad_soyad=? AND (tersane_id IS NULL OR tersane_id != ?)",
+                                            (self.tersane_id, ad, self.tersane_id)
+                                        )
                                 conn.commit()
                             total_saved += len(batch_data)
                         except Exception as e:
@@ -359,6 +370,8 @@ class UploadPage(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
+        self._current_batch_id = None   # WHY: last successful upload batch_id for rollback.
+        self._current_firma_id = None   # WHY: firma scope for rollback month-lock check.
 
         # Baslik
         title = QLabel("Excel / CSV Dosyası Yükleme")
@@ -429,6 +442,15 @@ class UploadPage(QWidget):
         self.log.setMaximumHeight(200)
         self.log.setStyleSheet("font-size: 11px; background-color: #1e1e1e; border: 1px solid #333; border-radius: 4px; padding: 4px;")
         layout.addWidget(self.log)
+
+        self.btn_rollback = QPushButton("Son Yuklemeyi Geri Al")
+        self.btn_rollback.setStyleSheet(
+            "background-color: #B71C1C; color: white; padding: 8px; font-weight: bold; border-radius: 4px;"
+        )
+        self.btn_rollback.setEnabled(False)  # WHY: enabled only after a successful upload this session.
+        self.btn_rollback.clicked.connect(self._do_rollback)
+        layout.addWidget(self.btn_rollback)
+
         layout.addStretch()
 
     def update_month_info(self):
@@ -456,6 +478,13 @@ class UploadPage(QWidget):
         self.update_month_info()
         if total > 0:
             self.append_log(f"<span style='color:#66BB6A;'>{total} kayıt başarıyla işlendi.</span>")
+            # Batch_id'yi kalıcı olarak kaydet ve rollback butonunu etkinleştir
+            if self._current_batch_id:
+                self.db.set_last_upload_batch_id(self._current_batch_id)
+                self.btn_rollback.setEnabled(True)  # WHY: allow rollback only after successful upload.
+                self.append_log(
+                    f"<span style='color:#90CAF9;'>Geri alma mevcut (batch: {self._current_batch_id[:8]}...).</span>"
+                )
             self.signal_manager.data_updated.emit()
         else:
             self.append_log("<span style='color:#FFA726;'>Hiçbir kayıt eklenmedi.</span>")
@@ -640,9 +669,26 @@ class UploadPage(QWidget):
             else:
                 self.append_log(f"<span style='color:#FFA726;'>{len(conflicts)} mevcut kaydin uzerine yazilacak.</span>")
 
+        # 7.5) Batch ID üret + personel snapshot al (rollback için)
+        import uuid
+        batch_id = uuid.uuid4().hex
+        self._current_batch_id = batch_id
+        self._current_firma_id = firma_id
+        self.btn_rollback.setEnabled(False)  # WHY: disable until upload succeeds.
+        ad_col = zorunlu.get('ad')
+        if ad_col and ad_col in df.columns:
+            try:
+                ad_list = list(set(
+                    str(v).strip() for v in df[ad_col].dropna()
+                    if str(v).strip() and str(v).strip().lower() != 'nan'
+                ))
+                self.db.snapshot_personel_for_batch(batch_id, ad_list)
+            except Exception:
+                pass  # SAFEGUARD: snapshot failure must not block upload.
+
         # 8) Worker baslat (Thread yapisi AYNEN korunuyor)
         self.thread = QThread()
-        self.worker = UploadWorker(files, self.db, all_personel, settings_cache, skip_keys, firma_id, tersane_id)
+        self.worker = UploadWorker(files, self.db.db_file, all_personel, settings_cache, skip_keys, firma_id, tersane_id, batch_id)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress.setValue)
@@ -823,6 +869,34 @@ class UploadPage(QWidget):
             self.append_log(f"<span style='color:#66BB6A;'>Tersane secildi: {selected_text}</span>")
             return selected_id
         return None
+
+    def _do_rollback(self):
+        """Son yükleme batch'ini tamamen geri alır."""
+        batch_id = self._current_batch_id
+        if not batch_id:
+            QMessageBox.information(self, "Rollback", "Geri alınacak yükleme bulunamadı.")
+            return
+        reply = QMessageBox.question(
+            self, "Geri Al",
+            f"Son yükleme ({batch_id[:8]}...) geri alınacak.\n"
+            "Bu işlem yüklenen kayıtları çöp kutusuna taşır ve personel tersane atamasını geri yükler.\n\n"
+            "Devam etmek istiyor musunuz?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        ok, result = self.db.rollback_upload_batch_full(batch_id, firma_id=self._current_firma_id)
+        if ok:
+            self.append_log(
+                f"<span style='color:#66BB6A;'>Geri alma tamamlandi: {result} kayit trash'e taşındı.</span>"
+            )
+            self._current_batch_id = None
+            self._current_firma_id = None
+            self.btn_rollback.setEnabled(False)
+            self.update_month_info()
+            self.signal_manager.data_updated.emit()
+        else:
+            QMessageBox.warning(self, "Rollback Hatasi", f"Geri alma başarısız: {result}")
 
     def header_mapping_dialog(self, excel_cols, eksik):
         dialog = QDialog(self)

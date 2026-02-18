@@ -43,10 +43,13 @@ def hesapla_ceza_dakika(giris_dk, cikis_dk, kayip_dk, dt_tarih, tersane_saatleri
     aksam_referans = AKSAM_REFERANS_DK
     erken_cikis_limit = ERKEN_CIKIS_LIMIT_DK
 
+    cuma_kayip_tolerans = CUMA_KAYIP_TOLERANS_DK  # WHY: default to module constant if no tersane override.
+
     if tersane_saatleri:
         sabah_tolerans = tersane_saatleri.get('sabah_tolerans_dk', SABAH_TOLERANS_DK)
         aksam_referans = tersane_saatleri.get('aksam_referans_dk', AKSAM_REFERANS_DK)
         erken_cikis_limit = tersane_saatleri.get('erken_cikis_limit_dk', ERKEN_CIKIS_LIMIT_DK)
+        cuma_kayip_tolerans = tersane_saatleri.get('cuma_kayip_tolerans_dk', CUMA_KAYIP_TOLERANS_DK)  # WHY: tersane bazlı Cuma toleransı.
 
     ceza_dakika = 0
 
@@ -63,9 +66,9 @@ def hesapla_ceza_dakika(giris_dk, cikis_dk, kayip_dk, dt_tarih, tersane_saatleri
 
     # Gün İçi Kayıp
     if kayip_dk > 0:
-        if dt_tarih.weekday() == 4: # Cuma
-            if kayip_dk > CUMA_KAYIP_TOLERANS_DK:
-                ceza_dakika += (kayip_dk - CUMA_KAYIP_TOLERANS_DK)
+        if dt_tarih.weekday() == 4:  # Cuma
+            if kayip_dk > cuma_kayip_tolerans:  # WHY: tersane bazlı tolerans, fallback global sabit.
+                ceza_dakika += (kayip_dk - cuma_kayip_tolerans)
         else:
             ceza_dakika += kayip_dk
 

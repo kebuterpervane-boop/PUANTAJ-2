@@ -306,6 +306,40 @@ def migration_006_enforce_avans_kesinti_constraints(conn):
     conn.commit()
 
 
+def migration_007_upload_batch_infra(conn):
+    """Batch yükleme altyapısı: import_batch_id kolonu, app_meta ve upload_batch_log_personel tabloları."""
+    cur = conn.cursor()
+
+    # 1) gunluk_kayit'a import_batch_id ekle (varsa ekleme)
+    cur.execute("PRAGMA table_info(gunluk_kayit)")
+    cols = [r[1] for r in cur.fetchall()]
+    if 'import_batch_id' not in cols:
+        cur.execute("ALTER TABLE gunluk_kayit ADD COLUMN import_batch_id TEXT DEFAULT NULL")
+
+    # 2) app_meta: uygulama geneli anahtar/değer deposu
+    cur.execute('''CREATE TABLE IF NOT EXISTS app_meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT
+    )''')
+
+    # 3) upload_batch_log_personel: yükleme öncesi personel snapshot'ı
+    cur.execute('''CREATE TABLE IF NOT EXISTS upload_batch_log_personel (
+        batch_id      TEXT,
+        ad_soyad      TEXT,
+        personel_id   INTEGER,
+        old_firma_id  INTEGER,
+        old_tersane_id INTEGER,
+        old_ekip      TEXT,
+        old_gorev     TEXT,
+        old_ucret     REAL,
+        old_durum     TEXT,
+        changed_at    TEXT,
+        PRIMARY KEY (batch_id, ad_soyad)
+    )''')
+
+    conn.commit()
+
+
 # Ordered list of migrations
 MIGRATIONS = [
     migration_001_add_phone_to_personel,
@@ -314,4 +348,5 @@ MIGRATIONS = [
     migration_004_ensure_yevmiye_katsayilari_schema,
     migration_005_convert_rules_to_exit_time,
     migration_006_enforce_avans_kesinti_constraints,
+    migration_007_upload_batch_infra,
 ]

@@ -1,10 +1,22 @@
 import sqlite3
+import threading
 from datetime import datetime
 
 class AyKilitDB:
+    _initialized_paths = set()   # WHY: one-time CREATE TABLE per DB path; avoids repeated I/O overhead.
+    _init_lock = threading.Lock()  # WHY: protect set from concurrent first-access by multiple threads.
+
     def __init__(self, db_path):
         self.db_path = db_path
-        self._init_table()
+        self._maybe_init_table()  # WHY: guarded init instead of unconditional to cut overhead per call.
+
+    def _maybe_init_table(self):
+        """CREATE TABLE yalnızca ilk erişimde çalışır; sonraki çağrılarda atlanır."""
+        with AyKilitDB._init_lock:
+            if self.db_path in AyKilitDB._initialized_paths:
+                return  # WHY: already initialized for this path in this process; skip.
+            self._init_table()
+            AyKilitDB._initialized_paths.add(self.db_path)
 
     def _init_table(self):
         with sqlite3.connect(self.db_path) as conn:
