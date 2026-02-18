@@ -33,6 +33,7 @@ class AvansPage(QWidget):
         self.db = Database()
         self.signal_manager = signal_manager
         self.tersane_id = 0
+        self.aktif_firma_id = 1
         self._needs_refresh = False  # NEW: lazy-load flag to avoid heavy refresh on hidden tabs.
         self._load_thread = None  # NEW: keep thread reference to avoid premature GC.
         self._load_worker = None  # NEW: keep worker reference to avoid GC while thread runs.
@@ -82,15 +83,15 @@ class AvansPage(QWidget):
         self.input_desc = QLineEdit()
         self.input_desc.setPlaceholderText("Açıklama")
 
-        btn = QPushButton("Kaydet")
-        btn.clicked.connect(self.save)
+        self.btn_save = QPushButton("Kaydet")
+        self.btn_save.clicked.connect(self.save)
 
         form.addWidget(self.combo_pers)
         form.addWidget(self.combo_tur)
         form.addWidget(self.date_ed)
         form.addWidget(self.input_tut)
         form.addWidget(self.input_desc)
-        form.addWidget(btn)
+        form.addWidget(self.btn_save)
         layout.addLayout(form)
 
         self.refresh_list()  # WHY: initial fill after date_ed exists.
@@ -104,9 +105,9 @@ class AvansPage(QWidget):
         self.table.setStyleSheet("QTableWidget { background-color: #2b2b2b; color: white; alternate-background-color: #2a2a2a; }")
         layout.addWidget(self.table)
 
-        btn_del = QPushButton("Seçiliyi Sil")
-        btn_del.clicked.connect(self.delete)
-        layout.addWidget(btn_del)
+        self.btn_del = QPushButton("Seçiliyi Sil")
+        self.btn_del.clicked.connect(self.delete)
+        layout.addWidget(self.btn_del)
 
     def refresh_list(self):
         current = self.combo_pers.currentText()
@@ -144,15 +145,24 @@ class AvansPage(QWidget):
         if tutar <= 0:
             QMessageBox.warning(self, "Hata", "Tutar sifirdan buyuk olmali.")
             return
-        self.db.save_avans(self.date_ed.date().toString("yyyy-MM-dd"),
-                           person, tur, tutar, self.input_desc.text().strip())
+        result = self.db.save_avans(
+            self.date_ed.date().toString("yyyy-MM-dd"),
+            person, tur, tutar, self.input_desc.text().strip(),
+            firma_id=self.aktif_firma_id
+        )
+        if result is False:
+            QMessageBox.warning(self, "Ay Kilitli", "Bu ay kilitlidir. Kayıt eklenemez.")
+            return
         self.update_view()  # WHY: refresh lists safely after save.
         self.signal_manager.data_updated.emit()
 
     def delete(self):
         row = self.table.currentRow()
         if row >= 0:
-            self.db.delete_avans(self.table.item(row, 0).text())
+            result = self.db.delete_avans(self.table.item(row, 0).text(), firma_id=self.aktif_firma_id)
+            if result is False:
+                QMessageBox.warning(self, "Ay Kilitli", "Bu ay kilitlidir. Kayıt silinemez.")
+                return
             self.update_view()  # WHY: refresh lists safely after delete.
             self.signal_manager.data_updated.emit()
 
@@ -193,6 +203,10 @@ class AvansPage(QWidget):
                 self.table.setItem(r, 3, QTableWidgetItem(row[3]))
                 self.table.setItem(r, 4, QTableWidgetItem(str(row[4])))
                 self.table.setItem(r, 5, QTableWidgetItem(row[5]))
+            y, m = self.date_ed.date().year(), self.date_ed.date().month()
+            locked = self.db.is_month_locked(y, m, self.aktif_firma_id)
+            self.btn_save.setEnabled(not locked)
+            self.btn_del.setEnabled(not locked)
         except RuntimeError:
             pass  # SAFEGUARD: UI object may be gone; ignore late signals.
 

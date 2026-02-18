@@ -1079,15 +1079,27 @@ class Database:
 
 
     def save_daily_record(self, data):
-        sql = '''INSERT OR REPLACE INTO gunluk_kayit 
-                    (tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, 
-                    hesaplanan_normal, hesaplanan_mesai, aciklama)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)'''
         with self.get_connection() as conn:
-            conn.execute(sql, (
-                data['tarih'], data['ad_soyad'], data['giris'], data['cikis'], 
-                data['kayip'], data['normal'], data['mesai'], data['aciklama']
-            ))
+            existing = conn.execute(
+                "SELECT id FROM gunluk_kayit WHERE tarih=? AND ad_soyad=?",
+                (data['tarih'], data['ad_soyad'])
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE gunluk_kayit SET giris_saati=?, cikis_saati=?, kayip_sure_saat=?,"
+                    " hesaplanan_normal=?, hesaplanan_mesai=?, aciklama=? WHERE id=?",
+                    (data['giris'], data['cikis'], data['kayip'],
+                     data['normal'], data['mesai'], data['aciklama'], existing[0])
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO gunluk_kayit"
+                    " (tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat,"
+                    "  hesaplanan_normal, hesaplanan_mesai, aciklama)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (data['tarih'], data['ad_soyad'], data['giris'], data['cikis'],
+                     data['kayip'], data['normal'], data['mesai'], data['aciklama'])
+                )
             conn.commit()
 
 
@@ -1101,17 +1113,36 @@ class Database:
 
     # --- TRASH / SİLME FONKSİYONLARI ---
 
-    def delete_records_between(self, start_date, end_date):
+    def delete_records_between(self, start_date, end_date, firma_id=None, tersane_id=None):
+        extra_where = ""
+        extra_params = []
+        if firma_id is not None:
+            extra_where += " AND firma_id=?"
+            extra_params.append(firma_id)
+        if tersane_id is not None:
+            extra_where += " AND tersane_id=?"
+            extra_params.append(tersane_id)
         with self.get_connection() as conn:
             c = conn.cursor()
-            c.execute("DELETE FROM gunluk_kayit WHERE tarih BETWEEN ? AND ?", (start_date, end_date))
+            c.execute(
+                f"DELETE FROM gunluk_kayit WHERE tarih BETWEEN ? AND ?{extra_where}",
+                [start_date, end_date] + extra_params
+            )
             d1 = c.rowcount
             c.execute("DELETE FROM avans_kesinti WHERE tarih BETWEEN ? AND ?", (start_date, end_date))
             conn.commit()
             return d1, c.rowcount
             
 
-    def move_records_to_trash(self, start_date, end_date):
+    def move_records_to_trash(self, start_date, end_date, firma_id=None, tersane_id=None):
+        extra_where = ""
+        extra_params = []
+        if firma_id is not None:
+            extra_where += " AND firma_id=?"
+            extra_params.append(firma_id)
+        if tersane_id is not None:
+            extra_where += " AND tersane_id=?"
+            extra_params.append(tersane_id)
         with self.get_connection() as conn:
             c = conn.cursor()
             now = datetime.now().isoformat()
@@ -1127,20 +1158,23 @@ class Database:
                 c.execute(
                     "INSERT INTO gunluk_kayit_trash (orig_id, tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, hesaplanan_normal, hesaplanan_mesai, aciklama, tersane_id, firma_id, manuel_kilit, batch_id, deleted_at) "
                     "SELECT id, tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, hesaplanan_normal, hesaplanan_mesai, aciklama, tersane_id, firma_id, COALESCE(manuel_kilit,0), ?, ? "
-                    "FROM gunluk_kayit WHERE tarih BETWEEN ? AND ?",
-                    (bid, now, start_date, end_date)
+                    f"FROM gunluk_kayit WHERE tarih BETWEEN ? AND ?{extra_where}",
+                    [bid, now, start_date, end_date] + extra_params
                 )
             else:
                 c.execute(
                     "INSERT INTO gunluk_kayit_trash (orig_id, tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, hesaplanan_normal, hesaplanan_mesai, aciklama, batch_id, deleted_at) "
                     "SELECT id, tarih, ad_soyad, giris_saati, cikis_saati, kayip_sure_saat, hesaplanan_normal, hesaplanan_mesai, aciklama, ?, ? "
-                    "FROM gunluk_kayit WHERE tarih BETWEEN ? AND ?",
-                    (bid, now, start_date, end_date)
+                    f"FROM gunluk_kayit WHERE tarih BETWEEN ? AND ?{extra_where}",
+                    [bid, now, start_date, end_date] + extra_params
                 )
             dd = c.rowcount
             c.execute("INSERT INTO avans_kesinti_trash (orig_id, tarih, ad_soyad, tur, tutar, aciklama, batch_id, deleted_at) SELECT id, tarih, ad_soyad, tur, tutar, aciklama, ?, ? FROM avans_kesinti WHERE tarih BETWEEN ? AND ?", (bid, now, start_date, end_date))
             da = c.rowcount
-            c.execute("DELETE FROM gunluk_kayit WHERE tarih BETWEEN ? AND ?", (start_date, end_date))
+            c.execute(
+                f"DELETE FROM gunluk_kayit WHERE tarih BETWEEN ? AND ?{extra_where}",
+                [start_date, end_date] + extra_params
+            )
             c.execute("DELETE FROM avans_kesinti WHERE tarih BETWEEN ? AND ?", (start_date, end_date))
             c.execute("UPDATE trash_batches SET deleted_daily=?, deleted_avans=? WHERE id=?", (dd, da, bid))
             conn.commit()
@@ -1208,14 +1242,33 @@ class Database:
             return res[0] or 0.0
 
 
-    def save_avans(self, tarih, ad, tur, tutar, aciklama):
+    def save_avans(self, tarih, ad, tur, tutar, aciklama, firma_id=None):
+        if firma_id is not None:
+            try:
+                y, m = int(tarih[:4]), int(tarih[5:7])
+                if self.is_month_locked(y, m, firma_id):
+                    return False
+            except Exception:
+                pass
         with self.get_connection() as conn:
-            conn.execute("INSERT INTO avans_kesinti (tarih, ad_soyad, tur, tutar, aciklama) VALUES (?,?,?,?,?)", (tarih, ad, tur, tutar, aciklama)); conn.commit()
-            
+            conn.execute("INSERT INTO avans_kesinti (tarih, ad_soyad, tur, tutar, aciklama) VALUES (?,?,?,?,?)", (tarih, ad, tur, tutar, aciklama))
+            conn.commit()
+        return True
 
-    def delete_avans(self, id):
+    def delete_avans(self, id, firma_id=None):
         with self.get_connection() as conn:
-            conn.execute("DELETE FROM avans_kesinti WHERE id=?", (id,)); conn.commit()
+            if firma_id is not None:
+                try:
+                    row = conn.execute("SELECT tarih FROM avans_kesinti WHERE id=?", (id,)).fetchone()
+                    if row:
+                        y, m = int(row[0][:4]), int(row[0][5:7])
+                        if self.is_month_locked(y, m, firma_id):
+                            return False
+                except Exception:
+                    pass
+            conn.execute("DELETE FROM avans_kesinti WHERE id=?", (id,))
+            conn.commit()
+        return True
 
 
     def get_dashboard_data(self, year, month, tersane_id=None):

@@ -266,6 +266,7 @@ class RecordsPage(QWidget):
         self.db = Database()
         self.signal_manager = signal_manager
         self.tersane_id = 0
+        self.aktif_firma_id = 1
         self._needs_refresh = False  # NEW: lazy-load flag to avoid heavy refresh on hidden tabs.
         self._period_initialized = False  # NEW: set default year/month only once (avoid jumps on refresh).
         self._period_signals_connected = False  # NEW: avoid duplicate signal connections.
@@ -341,8 +342,7 @@ class RecordsPage(QWidget):
     def _on_period_changed(self):
         year = int(self.combo_year.currentText())
         month = self.combo_month.currentIndex() + 1
-        firma_id = 1  # Gelişmiş firma desteği varsa buradan alınmalı
-        locked = self.db.is_month_locked(year, month, firma_id)
+        locked = self.db.is_month_locked(year, month, self.aktif_firma_id)
         self._set_month_locked_ui(locked)
         self.load_data()
 
@@ -615,8 +615,7 @@ class RecordsPage(QWidget):
     def show_context_menu(self, pos: QPoint):
         year = int(self.combo_year.currentText())
         month = self.combo_month.currentIndex() + 1
-        firma_id = 1
-        if self.db.is_month_locked(year, month, firma_id):
+        if self.db.is_month_locked(year, month, self.aktif_firma_id):
             QMessageBox.warning(self, "Ay Kilitli", "Bu ay kilitlidir. Sağ tık işlemleri devre dışı.")
             return
         # ...eski context menu kodu...
@@ -750,7 +749,12 @@ class RecordsPage(QWidget):
             return
 
         try:
-            batch_id, deleted_daily, deleted_avans = self.db.move_records_to_trash(start_date, end_date)
+            tersane_filter = self.tersane_id if self.tersane_id and self.tersane_id > 0 else None
+            batch_id, deleted_daily, deleted_avans = self.db.move_records_to_trash(
+                start_date, end_date,
+                firma_id=self.aktif_firma_id,
+                tersane_id=tersane_filter
+            )
             QMessageBox.information(self, "Silindi", f"Silme başarılı: {deleted_daily} günlük kayıt, {deleted_avans} avans/kesinti silindi. (Batch {batch_id})\nGeri almak için 'Geri Al' butonunu kullanın.")
             # Refresh
             self.signal_manager.data_updated.emit()
