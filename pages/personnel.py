@@ -347,6 +347,11 @@ class PersonnelPage(QWidget):
 
     def load_data(self):
         self.db.sync_personnel()
+        # Yükleme sırasında itemChanged sinyali _changed_rows'u kirletmesin
+        try:
+            self.table.itemChanged.disconnect(self._on_item_changed)
+        except RuntimeError:
+            pass  # Daha önce bağlanmamışsa sorun değil
         sorting = self.table.isSortingEnabled()
         if sorting:
             self.table.setSortingEnabled(False)
@@ -362,6 +367,13 @@ class PersonnelPage(QWidget):
             data = [d for d in data if search_text in (d[0] or "").lower() or search_text in (d[2] or "").lower()]
         self.table.setRowCount(len(data))
         
+        # Tersane listesini bir kere yükle (her satır için ayrı sorgu yapma)
+        tersaneler = []
+        try:
+            tersaneler = self.db.get_tersaneler()
+        except Exception:
+            pass
+
         for row, row_data in enumerate(data):
             # row_data: (ad, maas, ekip, ozel, ekstra, izin_hakki, ise_baslangic, cikis_tarihi, ekstra_not, avans_not, yevmiyeci_mi)
             ad = row_data[0]
@@ -375,7 +387,7 @@ class PersonnelPage(QWidget):
             ekstra_not = row_data[8] if len(row_data) > 8 else ""
             avans_not = row_data[9] if len(row_data) > 9 else ""
             yevmiyeci_mi = row_data[10] if len(row_data) > 10 else 0
-            
+
             item_ad = QTableWidgetItem(ad)
             item_ad.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(row, 0, item_ad)
@@ -389,14 +401,25 @@ class PersonnelPage(QWidget):
             self.table.setItem(row, 8, QTableWidgetItem(cikis_tarihi or ""))
             self.table.setItem(row, 9, QTableWidgetItem(avans_not or ""))
             self.table.setItem(row, 10, QTableWidgetItem("✓" if yevmiyeci_mi else ""))
-            # Tersane adı
-            tersane_adi = self._get_tersane_adi_for_personel(ad)
-            item_tersane = QTableWidgetItem(tersane_adi)
-            item_tersane.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self.table.setItem(row, 11, item_tersane)
+            # Tersane dropdown
+            tersane_id_for_row, _ = self._get_tersane_info_for_personel(ad)
+            combo_t = QComboBox()
+            combo_t.setStyleSheet("background-color: #222; color: white; border: none;")
+            combo_t.blockSignals(True)  # Kurulum sırasında _changed_rows tetiklenmesin
+            for t in tersaneler:
+                combo_t.addItem(t[1], t[0])  # (ad, id)
+            idx_t = combo_t.findData(tersane_id_for_row)
+            if idx_t >= 0:
+                combo_t.setCurrentIndex(idx_t)
+            combo_t.blockSignals(False)
+            combo_t.currentIndexChanged.connect(lambda _, r=row: self._changed_rows.add(r))
+            self.table.setCellWidget(row, 11, combo_t)
 
         if sorting:
             self.table.setSortingEnabled(True)
+        # Yükleme tamamlandı — sinyali yeniden bağla, dirty state temizle
+        self.table.itemChanged.connect(self._on_item_changed)
+        self._changed_rows.clear()
 
     def add_personnel(self):
         ok, ad = ensure_non_empty(self.input_ad.text(), "Ad Soyad")
@@ -497,13 +520,15 @@ class PersonnelPage(QWidget):
                     avans_not = _safe_item_text(row, 9, "")
                     yevmiyeci_text = _safe_item_text(row, 10, "").strip()
                     yevmiyeci_mi = 1 if yevmiyeci_text else 0
+                    combo_t = self.table.cellWidget(row, 11)
+                    tersane_id = combo_t.currentData() if combo_t else None
                     if ozel == "Yok":
                         ozel = None
                     tasks.append({
                         'ad': ad, 'maas': maas, 'ekip': ekip, 'ozel': ozel,
                         'ekstra': ekstra, 'izin_hakki': izin_hakki, 'ise_baslangic': ise_baslangic,
                         'cikis_tarihi': cikis_tarihi, 'ekstra_not': ekstra_not, 'avans_not': avans_not,
-                        'yevmiyeci_mi': yevmiyeci_mi
+                        'yevmiyeci_mi': yevmiyeci_mi, 'tersane_id': tersane_id
                     })
                 except Exception as e:
                     try:
@@ -642,12 +667,19 @@ class PersonnelPage(QWidget):
 
     def _get_tersane_adi_for_personel(self, ad_soyad):
         """Personelin bağlı olduğu tersanenin adını döndürür."""
+        tid, tad = self._get_tersane_info_for_personel(ad_soyad)
+        return tad
+
+    def _get_tersane_info_for_personel(self, ad_soyad):
+        """Personelin bağlı olduğu tersanenin (id, ad) tuple'ını döndürür."""
         try:
             with self.db.get_connection() as conn:
                 row = conn.execute(
-                    "SELECT t.ad FROM personel p LEFT JOIN tersane t ON p.tersane_id = t.id WHERE p.ad_soyad=?",
+                    "SELECT p.tersane_id, t.ad FROM personel p LEFT JOIN tersane t ON p.tersane_id = t.id WHERE p.ad_soyad=?",
                     (ad_soyad,)
                 ).fetchone()
-                return row[0] if row and row[0] else ""
+                if row:
+                    return row[0], (row[1] or "")
+                return None, ""
         except Exception:
-            return ""
+            return None, ""
