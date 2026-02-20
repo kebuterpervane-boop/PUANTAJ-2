@@ -19,6 +19,30 @@ def get_default_db_path():
     path.mkdir(parents=True, exist_ok=True)
     return path / "puantaj.db"
 
+def backup_database(keep_days=7):
+    """Günlük otomatik yedek: yedekler/ klasörüne tarihli kopya oluşturur, eski yedekleri siler."""
+    try:
+        db_path = get_default_db_path()
+        if not db_path.exists():
+            return
+        backup_dir = db_path.parent / "yedekler"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        backup_file = backup_dir / f"puantaj_{today_str}.db"
+        if not backup_file.exists():
+            shutil.copy2(db_path, backup_file)
+        # Eski yedekleri temizle (keep_days günden eskiler)
+        cutoff = datetime.now() - timedelta(days=keep_days)
+        for f in backup_dir.glob("puantaj_*.db"):
+            try:
+                file_date = datetime.strptime(f.stem.replace("puantaj_", ""), "%Y-%m-%d")
+                if file_date < cutoff:
+                    f.unlink()
+            except ValueError:
+                pass  # Tarih formatı uyuşmayan dosyalara dokunma
+    except Exception:
+        pass  # Yedekleme hatası uygulamayı durdurmasın
+
 def relocate_old_db_if_present(target_db):
     possible_old = [
         Path.cwd() / "puantaj.db",

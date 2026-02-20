@@ -8,7 +8,7 @@ from PySide6.QtGui import QPalette, QColor
 
 from core.user_config import load_config, save_config
 from core.signals import SignalManager
-from core.database import Database
+from core.database import Database, backup_database
 from pages.upload import UploadPage
 from pages.records import RecordsPage
 from pages.personnel import PersonnelPage
@@ -396,6 +396,7 @@ if __name__ == "__main__":
     db.current_firma_id = 1  # GENEL
 
     if LoginDialog(db).exec():
+        backup_database()
         window = MainWindow()
         window.show()
         sys.exit(app.exec())
