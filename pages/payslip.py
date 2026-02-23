@@ -363,7 +363,13 @@ class PayslipPage(QWidget):
         with self.db.get_connection() as conn:
             c = conn.cursor()
             p_info = c.execute("SELECT maas, ekip_adi, ekstra_odeme, COALESCE(yevmiyeci_mi, 0) FROM personel WHERE ad_soyad=?", (person_name,)).fetchone()
-            maas, ekip, ekstra, yevmiyeci_mi = p_info or (0, None, 0.0, 0)
+            maas, ekip, ekstra_kalici, yevmiyeci_mi = p_info or (0, None, 0.0, 0)
+            # Aylık ekstra varsa personel_ekstra_aylik'ten al; yoksa personel.ekstra_odeme'ye düş.
+            aylik_row = c.execute(
+                "SELECT miktar FROM personel_ekstra_aylik WHERE ad_soyad=? AND yil=? AND ay=?",
+                (person_name, year, month)
+            ).fetchone()
+            ekstra = aylik_row[0] if aylik_row is not None else ekstra_kalici
             yevmiyeci_mi = bool(yevmiyeci_mi)
 
             if tersane_id and tersane_id > 0:  # WHY: filter daily records by active tersane when selected.

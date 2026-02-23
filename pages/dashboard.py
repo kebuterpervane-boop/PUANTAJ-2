@@ -11,6 +11,7 @@ import os
 import calendar
 from core.database import Database
 from core.user_config import load_config, save_config
+from core.hesaplama import hesapla_maktu_hakedis
 
 class ExportWorker(QObject):  # WHY: generic worker for background export tasks.
     finished = Signal(object)  # WHY: return payload (path/status) to UI thread.
@@ -319,37 +320,20 @@ class DashboardPage(QWidget):
                 
                 # YEVMİYECİ HESAPLAMA
                 if yevmiyeci_mi:
-                    # Yevmiyeci için:
-                    # norm = yevmiye sayısı
-                    # mesai = mesai yevmiye sayısı
-                    # maas = günlük yevmiye tutarı
                     gunluk_yevmiye = maas
-                    brut = (norm * gunluk_yevmiye) + (mesai * gunluk_yevmiye)
+                    total_raw = norm + mesai
+                    total_yevmiye_rounded = round(total_raw * 4) / 4.0
+                    brut = total_yevmiye_rounded * gunluk_yevmiye
                     saat_ucreti = gunluk_yevmiye  # Saat ücreti yerine günlük yevmiye
                 else:
-                    # MAKTU ÜCRET SİSTEMİ (Maaşlılar için)
-                    # 1. Çalışılan gün sayısını hesapla (saatlerden)
-                    # Normal saatler: 7.5 * gün
-                    if norm > 0:
-                        calisan_gun = norm / 7.5
-                    else:
-                        calisan_gun = 0
-                    
-                    # 2. Eksik gün hesabı: Takvim günü - Çalışılan gün
-                    eksik_gun = calendar_gun_sayisi - calisan_gun
-                    
-                    # 3. Ödemeye esas gün: 30 - Eksik Gün (maksimum 30)
-                    odemeye_esas_gun = min(30, max(0, 30 - eksik_gun))
-                    
-                    # 4. Hakediş Hesabı: (Ödemeye esas gün / 30) × Maaş
-                    hakedis = (odemeye_esas_gun / 30.0) * maas if maas > 0 else 0
-                    
-                    # 5. Mesai Bonusu: Mesai saatleri × saatlik ücret × 1.5
-                    yevmiye = maas / 30.0 if maas > 0 else 0
-                    saat_ucreti = yevmiye / 7.5 if yevmiye > 0 else 0
-                    mesai_bonus = (mesai * saat_ucreti) if mesai > 0 else 0
-                    
-                    # 6. Brüt = Hakediş + Mesai Bonusu
+                    # MAKTU ÜCRET SİSTEMİ — Bordro ile aynı formül
+                    calisan_gun_sayisi_row = row.get('calisan_gun_sayisi', 0)
+                    maktu = hesapla_maktu_hakedis(y, m, calisan_gun_sayisi_row, maas)
+                    hakedis = maktu['hakedis']
+                    saat_ucreti = maktu['gunluk_ucret']
+                    # Mesai: mesai saat * (maas / 225)
+                    mesai_saat_ucreti = maas / 225.0 if maas > 0 else 0
+                    mesai_bonus = mesai * mesai_saat_ucreti
                     brut = hakedis + mesai_bonus
                 net = brut + ekstra - avans
                 
@@ -500,6 +484,8 @@ class DashboardPage(QWidget):
             except Exception:
                 calendar_gun_sayisi = 30
 
+            # Aylık ekstra map — personel_ekstra_aylik öncelikli, fallback personel.ekstra_odeme
+            ekstra_aylik_map = self.db.get_ekstra_aylik_bulk(dt_from.year, dt_from.month)
             tot_pay, tot_avans, tot_ot_saat, tot_ot_yev = 0.0, 0.0, 0.0, 0.0
             for p in persons:
                 with self.db.get_connection() as conn:
@@ -508,23 +494,24 @@ class DashboardPage(QWidget):
                     inf = c.fetchone() or (0, '', 0.0, 0)
                 maas = float(inf[0] or 0)
                 ekip = inf[1]
-                ekstra = float(inf[2] or 0.0)
+                ekstra = ekstra_aylik_map[p][0] if p in ekstra_aylik_map else float(inf[2] or 0.0)
                 yevmiyeci_mi = bool(inf[3])
                 top_normal = df[df['Personel'] == p]['Normal'].sum()
                 top_mesai = df[df['Personel'] == p]['Mesai'].sum()
 
                 if yevmiyeci_mi:
                     gunluk_yevmiye = maas
-                    brut = (top_normal * gunluk_yevmiye) + (top_mesai * gunluk_yevmiye)
+                    total_raw = top_normal + top_mesai
+                    total_yevmiye_rounded = round(total_raw * 4) / 4.0
+                    brut = total_yevmiye_rounded * gunluk_yevmiye
                     saat_ucreti = gunluk_yevmiye
                 else:
-                    calisan_gun = top_normal / 7.5 if top_normal > 0 else 0
-                    eksik_gun = calendar_gun_sayisi - calisan_gun
-                    odemeye_esas_gun = min(30, max(0, 30 - eksik_gun))
-                    hakedis = (odemeye_esas_gun / 30.0) * maas if maas > 0 else 0
-                    yevmiye = maas / 30.0 if maas > 0 else 0
-                    saat_ucreti = yevmiye / 7.5 if yevmiye > 0 else 0
-                    mesai_bonus = (top_mesai * saat_ucreti) if top_mesai > 0 else 0
+                    calisan_gun_sayisi_row = len(df[(df['Personel'] == p) & (df['Normal'] > 0)])
+                    maktu = hesapla_maktu_hakedis(dt_from.year, dt_from.month, calisan_gun_sayisi_row, maas)
+                    hakedis = maktu['hakedis']
+                    saat_ucreti = maktu['gunluk_ucret']
+                    mesai_saat_ucreti = maas / 225.0 if maas > 0 else 0
+                    mesai_bonus = top_mesai * mesai_saat_ucreti
                     brut = hakedis + mesai_bonus
 
                 avans = float(avans_map.get(p, 0.0) or 0.0)
@@ -902,6 +889,8 @@ class DashboardPage(QWidget):
             except Exception:
                 calendar_gun_sayisi = 30
 
+            # Aylık ekstra map — personel_ekstra_aylik öncelikli, fallback personel.ekstra_odeme
+            ekstra_aylik_map = db.get_ekstra_aylik_bulk(dt_from.year, dt_from.month)
             tot_pay, tot_avans, tot_ot_saat, tot_ot_yev = 0.0, 0.0, 0.0, 0.0
             for p in persons:
                 with db.get_connection() as conn:
@@ -910,23 +899,24 @@ class DashboardPage(QWidget):
                     inf = c.fetchone() or (0, '', 0.0, 0)
                 maas = float(inf[0] or 0)
                 ekip = inf[1]
-                ekstra = float(inf[2] or 0.0)
+                ekstra = ekstra_aylik_map[p][0] if p in ekstra_aylik_map else float(inf[2] or 0.0)
                 yevmiyeci_mi = bool(inf[3])
                 top_normal = df[df['Personel'] == p]['Normal'].sum()
                 top_mesai = df[df['Personel'] == p]['Mesai'].sum()
 
                 if yevmiyeci_mi:
                     gunluk_yevmiye = maas
-                    brut = (top_normal * gunluk_yevmiye) + (top_mesai * gunluk_yevmiye)
+                    total_raw = top_normal + top_mesai
+                    total_yevmiye_rounded = round(total_raw * 4) / 4.0
+                    brut = total_yevmiye_rounded * gunluk_yevmiye
                     saat_ucreti = gunluk_yevmiye
                 else:
-                    calisan_gun = top_normal / 7.5 if top_normal > 0 else 0
-                    eksik_gun = calendar_gun_sayisi - calisan_gun
-                    odemeye_esas_gun = min(30, max(0, 30 - eksik_gun))
-                    hakedis = (odemeye_esas_gun / 30.0) * maas if maas > 0 else 0
-                    yevmiye = maas / 30.0 if maas > 0 else 0
-                    saat_ucreti = yevmiye / 7.5 if yevmiye > 0 else 0
-                    mesai_bonus = (top_mesai * saat_ucreti) if top_mesai > 0 else 0
+                    calisan_gun_sayisi_row = len(df[(df['Personel'] == p) & (df['Normal'] > 0)])
+                    maktu = hesapla_maktu_hakedis(dt_from.year, dt_from.month, calisan_gun_sayisi_row, maas)
+                    hakedis = maktu['hakedis']
+                    saat_ucreti = maktu['gunluk_ucret']
+                    mesai_saat_ucreti = maas / 225.0 if maas > 0 else 0
+                    mesai_bonus = top_mesai * mesai_saat_ucreti
                     brut = hakedis + mesai_bonus
 
                 avans = float(avans_map.get(p, 0.0) or 0.0)

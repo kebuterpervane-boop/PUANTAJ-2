@@ -364,6 +364,7 @@ class IzinYonetimiPage(QWidget):
             self.signal_manager.data_updated.emit()
             QMessageBox.information(self, "Başarılı", "İzin kaydı işlendi ve Onaylı olarak güncellendi.")
         except Exception as e:
+            self.load_data()  # DB durumu değişmiş olabilir, tabloyu güncelle
             QMessageBox.critical(self, "Hata", f"İzin işlenirken hata: {e}")
 
     def delete_izin(self, izin_id):

@@ -38,6 +38,13 @@ class PersonnelSaveWorker(QObject):
                     t.get('ekstra_not'), t.get('avans_not'), t.get('yevmiyeci_mi', 0),
                     tersane_id=t.get('tersane_id')
                 )
+                # Aylık ekstra varsa ayrı tabloya kaydet.
+                if t.get('aylik_ekstra') is not None and t.get('aylik_ekstra_yil') and t.get('aylik_ekstra_ay'):
+                    self.db.set_ekstra_aylik(
+                        t['ad'], t['aylik_ekstra_yil'], t['aylik_ekstra_ay'],
+                        t['aylik_ekstra'], t.get('aylik_ekstra_not') or '',
+                        tersane_id=t.get('tersane_id')
+                    )
                 if idx % 5 == 0 or idx == total:
                     self.progress.emit(idx, total)
             self.finished.emit(total)
@@ -56,9 +63,11 @@ class PersonnelPage(QWidget):
         self._save_worker = None  # NEW: keep worker reference to avoid GC while thread runs.
         self._save_dialog = None  # NEW: progress dialog reference for background saves.
         self._save_done_cb = None  # NEW: optional callback after save completes.
+        self._item_changed_connected = False  # WHY: track connection state to avoid RuntimeWarning on disconnect.
         self.setup_ui()
         self.load_data()
         self.table.itemChanged.connect(self._on_item_changed)
+        self._item_changed_connected = True
         self.signal_manager.data_updated.connect(self._on_data_updated)  # NEW: lazy refresh to avoid hidden-tab work.
 
     def set_tersane_id(self, tersane_id, refresh=True):
@@ -348,10 +357,9 @@ class PersonnelPage(QWidget):
     def load_data(self):
         self.db.sync_personnel()
         # Yükleme sırasında itemChanged sinyali _changed_rows'u kirletmesin
-        try:
+        if self._item_changed_connected:
             self.table.itemChanged.disconnect(self._on_item_changed)
-        except RuntimeError:
-            pass  # Daha önce bağlanmamışsa sorun değil
+            self._item_changed_connected = False
         sorting = self.table.isSortingEnabled()
         if sorting:
             self.table.setSortingEnabled(False)
@@ -374,19 +382,32 @@ class PersonnelPage(QWidget):
         except Exception:
             pass
 
+        # Seçili aya özel ekstra ödemeleri yükle (Tüm Dönem değilse)
+        ekstra_aylik_map = {}
+        if not self.chk_all_periods.isChecked():
+            year = int(self.filter_year.currentText())
+            month = self.filter_month.currentIndex() + 1
+            ekstra_aylik_map = self.db.get_ekstra_aylik_bulk(year, month, tersane_id=self.tersane_id)
+
         for row, row_data in enumerate(data):
             # row_data: (ad, maas, ekip, ozel, ekstra, izin_hakki, ise_baslangic, cikis_tarihi, ekstra_not, avans_not, yevmiyeci_mi)
             ad = row_data[0]
             maas = row_data[1]
             ekip = row_data[2]
             ozel = row_data[3]
-            ekstra = row_data[4]
             izin_hakki = row_data[5]
             ise_baslangic = row_data[6]
             cikis_tarihi = row_data[7]
-            ekstra_not = row_data[8] if len(row_data) > 8 else ""
             avans_not = row_data[9] if len(row_data) > 9 else ""
             yevmiyeci_mi = row_data[10] if len(row_data) > 10 else 0
+            # Aylık moda özel ekstra; Tüm Dönem ise personel tablosundaki kalıcı ekstra gösterilir
+            if ekstra_aylik_map:
+                aylik = ekstra_aylik_map.get(ad)
+                ekstra = aylik[0] if aylik else 0.0
+                ekstra_not = aylik[1] if aylik else ""
+            else:
+                ekstra = row_data[4]
+                ekstra_not = row_data[8] if len(row_data) > 8 else ""
 
             item_ad = QTableWidgetItem(ad)
             item_ad.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -419,6 +440,7 @@ class PersonnelPage(QWidget):
             self.table.setSortingEnabled(True)
         # Yükleme tamamlandı — sinyali yeniden bağla, dirty state temizle
         self.table.itemChanged.connect(self._on_item_changed)
+        self._item_changed_connected = True
         self._changed_rows.clear()
 
     def add_personnel(self):
@@ -492,6 +514,11 @@ class PersonnelPage(QWidget):
                 except Exception:
                     return default  # WHY: ensure safe read even if widget is invalid.
 
+            # Aylık mod mu? Ekstra, personel tablosuna değil personel_ekstra_aylik'e gidecek.
+            all_periods = self.chk_all_periods.isChecked()
+            ekstra_yil = int(self.filter_year.currentText()) if not all_periods else None
+            ekstra_ay = self.filter_month.currentIndex() + 1 if not all_periods else None
+
             for row in sorted(self._changed_rows):
                 try:
                     ok, ad = ensure_non_empty(_safe_item_text(row, 0, ""), "Ad Soyad")
@@ -526,9 +553,18 @@ class PersonnelPage(QWidget):
                         ozel = None
                     tasks.append({
                         'ad': ad, 'maas': maas, 'ekip': ekip, 'ozel': ozel,
-                        'ekstra': ekstra, 'izin_hakki': izin_hakki, 'ise_baslangic': ise_baslangic,
-                        'cikis_tarihi': cikis_tarihi, 'ekstra_not': ekstra_not, 'avans_not': avans_not,
-                        'yevmiyeci_mi': yevmiyeci_mi, 'tersane_id': tersane_id
+                        # Aylık modda ekstra personel tablosuna gitmez; aylik_ekstra alanlarıyla ayrıca kaydedilir.
+                        'ekstra': ekstra if all_periods else 0.0,
+                        'izin_hakki': izin_hakki, 'ise_baslangic': ise_baslangic,
+                        'cikis_tarihi': cikis_tarihi,
+                        'ekstra_not': ekstra_not if all_periods else None,
+                        'avans_not': avans_not,
+                        'yevmiyeci_mi': yevmiyeci_mi, 'tersane_id': tersane_id,
+                        # Aylık ekstra bilgileri — worker bunları personel_ekstra_aylik'e kaydeder.
+                        'aylik_ekstra': ekstra if not all_periods else None,
+                        'aylik_ekstra_not': ekstra_not if not all_periods else None,
+                        'aylik_ekstra_yil': ekstra_yil,
+                        'aylik_ekstra_ay': ekstra_ay,
                     })
                 except Exception as e:
                     try:

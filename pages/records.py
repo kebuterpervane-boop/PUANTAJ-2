@@ -684,9 +684,12 @@ class RecordsPage(QWidget):
                 self.table.setItem(row, 7, QTableWidgetItem("0.0"))
                 self.table.setItem(row, 8, QTableWidgetItem("0.0"))
                 self.table.setItem(row, 9, QTableWidgetItem("Sıfırlandı"))
-                self.db.bulk_update_hakedis([(0.0, 0.0, "Sıfırlandı", rec_id)])
                 with self.db.get_connection() as conn:
-                    conn.execute("UPDATE gunluk_kayit SET giris_saati=?, cikis_saati=?, kayip_sure_saat=? WHERE id=?", ("", "", "", rec_id))
+                    conn.execute(
+                        "UPDATE gunluk_kayit SET giris_saati=?, cikis_saati=?, kayip_sure_saat=?, "
+                        "hesaplanan_normal=?, hesaplanan_mesai=?, aciklama=? WHERE id=?",
+                        ("", "", "", 0.0, 0.0, "Sıfırlandı", rec_id)
+                    )
                     conn.commit()
             except Exception as e:
                 QMessageBox.critical(self, "Hata", f"Sıfırla işleminde hata: {e}")

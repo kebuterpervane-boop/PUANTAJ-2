@@ -293,7 +293,12 @@ def hesapla_hakedis(tarih_str, giris_str, cikis_str, kayip_sure_str, holiday_set
             ogle_bit_dk = parse_time_to_minutes(ogle_bitis)
             if ogle_bas_dk is not None and ogle_bit_dk is not None and ogle_bit_dk > ogle_bas_dk:
                 fiili_dk -= _overlap_minutes(giris_dk, cikis_dk, ogle_bas_dk, ogle_bit_dk)
-            fiili_dk -= max(0, kayip_dk)
+            # Cuma toleransı: Cuma günü tolerans sınırı altındaki kayıplar fiili süreden düşülmez.
+            effective_kayip_dk = kayip_dk
+            if dt_tarih.weekday() == 4:  # Cuma
+                cuma_tol = tersane_saatleri.get('cuma_kayip_tolerans_dk', CUMA_KAYIP_TOLERANS_DK) if tersane_saatleri else CUMA_KAYIP_TOLERANS_DK
+                effective_kayip_dk = max(0, kayip_dk - cuma_tol)
+            fiili_dk -= max(0, effective_kayip_dk)
             if ara_mola_dk > 0 and fiili_dk > 0:
                 fiili_dk = max(0, fiili_dk - ara_mola_dk)
 

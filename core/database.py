@@ -598,6 +598,15 @@ class Database:
                                         otomatik_kayit INTEGER DEFAULT 1)''',
                 "genel_ayarlar": '''CREATE TABLE IF NOT EXISTS genel_ayarlar (
                                     id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE, value INTEGER DEFAULT 0)''',
+                "personel_ekstra_aylik": '''CREATE TABLE IF NOT EXISTS personel_ekstra_aylik (
+                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                    ad_soyad TEXT NOT NULL,
+                                    yil INTEGER NOT NULL,
+                                    ay INTEGER NOT NULL,
+                                    miktar REAL DEFAULT 0.0,
+                                    aciklama TEXT DEFAULT '',
+                                    tersane_id INTEGER,
+                                    UNIQUE(ad_soyad, yil, ay))''',
                 "gunluk_kayit_trash": '''CREATE TABLE IF NOT EXISTS gunluk_kayit_trash (
                                             id INTEGER PRIMARY KEY AUTOINCREMENT, orig_id INTEGER, tarih TEXT, 
                                             ad_soyad TEXT, giris_saati TEXT, cikis_saati TEXT, kayip_sure_saat TEXT, 
@@ -733,7 +742,7 @@ class Database:
                 rules['tersane_saatleri'] = self.get_tersane_ayarlari_for_hesaplama(tersane_id)
                 return rules
             # GLOBAL fallback (old behavior)
-            return {
+            global_rules = {
                 'mesai_katsayilari': self.get_mesai_katsayilari(),
                 'yevmiye_katsayilari': self.get_yevmiye_katsayilari(),
                 'mesai_baslangic_saat': self.get_setting("mesai_baslangic_saat", "17:30"),
@@ -745,7 +754,9 @@ class Database:
                 'ara_mola_dk': self.get_setting("ara_mola_dk", "20"),
                 'fiili_saat_yuvarlama': self.get_setting("fiili_saat_yuvarlama", "ondalik"),
                 'friday_loss_tolerance_hours': self.get_setting("friday_loss_tolerance_hours", "1.0"),  # WHY: global Cuma toleransı (saat).
+                'tersane_saatleri': self.get_tersane_ayarlari_for_hesaplama(None),  # WHY: global personel için de cuma toleransı hesaplama motoruna ulaşsın.
             }
+            return global_rules
         except Exception:
             # SAFEGUARD: return minimal defaults if something goes wrong.
             return {
@@ -1173,6 +1184,33 @@ class Database:
             from core.app_logger import log_error
             log_error(f"Personel kayıt güncelleme hatası ({ad_soyad}): {e}")
 
+
+    def get_ekstra_aylik_bulk(self, yil, ay, tersane_id=None):
+        """Verilen yıl/ay için tüm personelin aylık ekstra ödemelerini dict olarak döndürür.
+        Dönüş: {ad_soyad: (miktar, aciklama)}"""
+        with self.get_connection() as conn:
+            if tersane_id and tersane_id > 0:
+                rows = conn.execute(
+                    "SELECT ad_soyad, miktar, aciklama FROM personel_ekstra_aylik WHERE yil=? AND ay=? AND tersane_id=?",
+                    (yil, ay, tersane_id)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT ad_soyad, miktar, aciklama FROM personel_ekstra_aylik WHERE yil=? AND ay=?",
+                    (yil, ay)
+                ).fetchall()
+        return {r[0]: (r[1], r[2]) for r in rows}
+
+    def set_ekstra_aylik(self, ad_soyad, yil, ay, miktar, aciklama='', tersane_id=None):
+        """Verilen personel ve ay için aylık ekstra ödemeyi upsert eder."""
+        with self.get_connection() as conn:
+            conn.execute(
+                """INSERT INTO personel_ekstra_aylik (ad_soyad, yil, ay, miktar, aciklama, tersane_id)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(ad_soyad, yil, ay) DO UPDATE SET miktar=excluded.miktar, aciklama=excluded.aciklama, tersane_id=excluded.tersane_id""",
+                (ad_soyad.strip(), yil, ay, miktar, aciklama or '', tersane_id)
+            )
+            conn.commit()
 
     def delete_unused_personnel(self):
         with self.get_connection() as conn:
@@ -1620,7 +1658,9 @@ class Database:
         with self.get_connection() as conn:
             c = conn.cursor()
             sql_puantaj = """SELECT g.ad_soyad, p.maas, p.ekip_adi, p.ekstra_odeme, COALESCE(p.yevmiyeci_mi, 0),
-                    SUM(g.hesaplanan_normal), SUM(g.hesaplanan_mesai) FROM gunluk_kayit g LEFT JOIN personel p ON g.ad_soyad = p.ad_soyad
+                    SUM(g.hesaplanan_normal), SUM(g.hesaplanan_mesai),
+                    SUM(CASE WHEN g.hesaplanan_normal > 0 THEN 1 ELSE 0 END)
+                    FROM gunluk_kayit g LEFT JOIN personel p ON g.ad_soyad = p.ad_soyad
                     WHERE g.tarih LIKE ?"""
             params_p = [f"{month_str}%"]
             if tersane_id and tersane_id > 0:
@@ -1639,13 +1679,18 @@ class Database:
             avans = c.execute(sql_avans, tuple(params_a)).fetchall()
 
             avans_dict = {r[0]: r[1] for r in avans}
+            # Aylık ekstra: personel_ekstra_aylik öncelikli, fallback personel.ekstra_odeme
+            ekstra_aylik = self.get_ekstra_aylik_bulk(year, month, tersane_id=tersane_id)
             result = []
             for row in puantaj:
+                ad = row[0]
+                ekstra = ekstra_aylik[ad][0] if ad in ekstra_aylik else (row[3] or 0.0)
                 result.append({
-                    "ad_soyad": row[0], "maas": row[1] or 0, "ekip": row[2] or "Diğer",
-                    "ekstra": row[3] or 0.0, "yevmiyeci_mi": row[4],
+                    "ad_soyad": ad, "maas": row[1] or 0, "ekip": row[2] or "Diğer",
+                    "ekstra": ekstra, "yevmiyeci_mi": row[4],
                     "top_normal": row[5], "top_mesai": row[6],
-                    "avans": avans_dict.get(row[0], 0.0)
+                    "calisan_gun_sayisi": row[7] or 0,
+                    "avans": avans_dict.get(ad, 0.0)
                 })
             return result
 
@@ -2002,6 +2047,14 @@ class Database:
                 firma_row = c.execute("SELECT id FROM firma WHERE ad='GENEL' LIMIT 1").fetchone()
                 personel_firma_id = int(firma_row[0]) if firma_row else 0
 
+            # Ay kilidi kontrolü
+            try:
+                iz_y, iz_m = int(izin_tarihi[:4]), int(izin_tarihi[5:7])
+                if self.is_month_locked(iz_y, iz_m, personel_firma_id):
+                    raise ValueError(f"Bu ay kilitlidir ({iz_y}/{iz_m:02d}). İzin eklenemez.")
+            except ValueError:
+                raise
+
             if self._is_yillik_izin_turu(canonical_izin_turu) and personel_row:
                 c.execute(
                     "UPDATE personel SET yillik_izin_hakki=? WHERE TRIM(ad_soyad)=TRIM(?)",
@@ -2152,6 +2205,20 @@ class Database:
             return None
 
         ad_soyad, izin_tarihi, izin_turu, gun_sayisi, aciklama = row
+
+        # Ay kilidi kontrolü — sil+ekle yapmadan önce kontrol et (veri kaybını önle)
+        with self.get_connection() as conn:
+            p_row = conn.execute(
+                "SELECT COALESCE(firma_id,0) FROM personel WHERE TRIM(ad_soyad)=TRIM(?)", (ad_soyad,)
+            ).fetchone()
+        firma_id_check = int(p_row[0]) if p_row else 0
+        try:
+            iz_y, iz_m = int(izin_tarihi[:4]), int(izin_tarihi[5:7])
+            if self.is_month_locked(iz_y, iz_m, firma_id_check):
+                raise ValueError(f"Bu ay kilitlidir ({iz_y}/{iz_m:02d}). İzin işlenemez.")
+        except ValueError:
+            raise
+
         self.delete_izin(izin_id)
         new_id = self.add_izin_with_auto_kayit(
             ad_soyad,
