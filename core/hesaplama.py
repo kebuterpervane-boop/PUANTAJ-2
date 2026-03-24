@@ -331,31 +331,40 @@ def hesapla_hakedis(tarih_str, giris_str, cikis_str, kayip_sure_str, holiday_set
 
         return round(normal_return, 2), round(mesai_return, 2), aciklama
 
-def hesapla_maktu_hakedis(year, month, calisan_gun_sayisi, aylik_maas):
+def hesapla_maktu_hakedis(year, month, toplam_normal_saat, aylik_maas):
     """
     Kritik Kural:
     - Ay kaç gün çekerse çeksin Referans 30'dur.
+    - Eksik saat = Ayın toplam referans saati - Çalışılan toplam saat
+    - Eksik gün = Eksik saat / 7.5
     - Hakediş = (Maaş / 30) * (30 - Eksik Gün)
+
+    Örn: Şubat 28 gün, toplam normal 175.5 saat:
+        Eksik saat = 28*7.5 - 175.5 = 34.5
+        Eksik gün  = 34.5 / 7.5 = 4.6
+        Ödemeye esas gün = 30 - 4.6 = 25.4
+        Hakediş = (54000/30) * 25.4 = 45720
     """
     ayin_gercek_gun_sayisi = calendar.monthrange(year, month)[1]
-    
-    # Eksik Gün Hesabı: Gerçek Ay Gün Sayısı - Çalışılan Gün
-    # Örn: Şubat 28 çeker, 20 gün çalıştı -> 8 gün eksik.
-    eksik_gun = ayin_gercek_gun_sayisi - calisan_gun_sayisi
-    
+
+    # Eksik Saat Hesabı: Ayın toplam referans saati - Çalışılan toplam saat
+    ayin_toplam_referans_saat = ayin_gercek_gun_sayisi * NORMAL_GUNLUK_SAAT
+    eksik_saat = max(0, ayin_toplam_referans_saat - toplam_normal_saat)
+
+    # Eksik Gün = Eksik Saat / Günlük Saat (7.5)
+    eksik_gun = eksik_saat / NORMAL_GUNLUK_SAAT
+
     # 30 Gün Kuralı Uygulaması
-    # Hakedişe Esas Gün = 30 - Eksik Gün
-    # Örn: 30 - 8 = 22 Gün ödenir.
     odemeye_esas_gun = max(0, MAKTU_REFERANS_GUN - eksik_gun)
-    
+
     gunluk_ucret = aylik_maas / MAKTU_REFERANS_GUN if aylik_maas > 0 else 0
     hakedis = gunluk_ucret * odemeye_esas_gun
-    
+
     return {
         'ayin_gercek_gun_sayisi': ayin_gercek_gun_sayisi,
-        'calisan_gun': calisan_gun_sayisi,
-        'eksik_gun': eksik_gun,
-        'odemeye_esas_gun': odemeye_esas_gun,
+        'toplam_normal_saat': toplam_normal_saat,
+        'eksik_gun': round(eksik_gun, 2),
+        'odemeye_esas_gun': round(odemeye_esas_gun, 2),
         'gunluk_ucret': round(gunluk_ucret, 2),
         'hakedis': round(hakedis, 2),
         'aciklama': ""

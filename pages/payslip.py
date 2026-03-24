@@ -420,11 +420,11 @@ class PayslipPage(QWidget):
             
         # --- MAKTU / STANDART HESABI ---
         else:
-            # Çalışılan gün sayısı: Normal saati 0'dan büyük olan günler (7.5 veya ceza olsa bile)
-            calisan_gun_sayisi = sum(1 for r in records_sorted if r[3] > 0)
-            
-            # Maktu Hesabı (30 gün kuralı)
-            maktu = hesapla_maktu_hakedis(year, month, calisan_gun_sayisi, maas)
+            # Toplam normal saat (saat bazlı maktu hesabı için)
+            toplam_normal_saat = sum(r[3] for r in records_sorted)
+
+            # Maktu Hesabı (30 gün kuralı, saat bazlı)
+            maktu = hesapla_maktu_hakedis(year, month, toplam_normal_saat, maas)
             
             # Mesai Hesabı (Mesai (Saat) * Saatlik Ücret) - çarpan yok
             total_mesai_saat = sum(r[4] for r in records_sorted)
@@ -435,13 +435,13 @@ class PayslipPage(QWidget):
             brut = maktu['hakedis'] + mesai_tutar
             
             result_data.update({
-                'total_normal': calisan_gun_sayisi * 7.5, # Bilgi amaçlı saat
+                'total_normal': toplam_normal_saat,
                 'total_mesai': total_mesai_saat,
                 'gunluk_ucret': maktu['gunluk_ucret'],
                 'brut': brut,
                 'net': brut + ekstra - total_avans - total_kesinti,
                 'maktu_hesap': maktu,
-                'calisan_gun_sayisi': calisan_gun_sayisi
+                'toplam_normal_saat': toplam_normal_saat
             })
             
         return result_data

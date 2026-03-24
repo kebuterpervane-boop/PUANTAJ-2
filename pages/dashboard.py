@@ -326,9 +326,8 @@ class DashboardPage(QWidget):
                     brut = total_yevmiye_rounded * gunluk_yevmiye
                     saat_ucreti = gunluk_yevmiye  # Saat ücreti yerine günlük yevmiye
                 else:
-                    # MAKTU ÜCRET SİSTEMİ — Bordro ile aynı formül
-                    calisan_gun_sayisi_row = row.get('calisan_gun_sayisi', 0)
-                    maktu = hesapla_maktu_hakedis(y, m, calisan_gun_sayisi_row, maas)
+                    # MAKTU ÜCRET SİSTEMİ — Bordro ile aynı formül (saat bazlı)
+                    maktu = hesapla_maktu_hakedis(y, m, norm, maas)
                     hakedis = maktu['hakedis']
                     saat_ucreti = maktu['gunluk_ucret']
                     # Mesai: mesai saat * (maas / 225)
@@ -506,8 +505,8 @@ class DashboardPage(QWidget):
                     brut = total_yevmiye_rounded * gunluk_yevmiye
                     saat_ucreti = gunluk_yevmiye
                 else:
-                    calisan_gun_sayisi_row = len(df[(df['Personel'] == p) & (df['Normal'] > 0)])
-                    maktu = hesapla_maktu_hakedis(dt_from.year, dt_from.month, calisan_gun_sayisi_row, maas)
+                    toplam_normal_saat = df[df['Personel'] == p]['Normal'].sum()
+                    maktu = hesapla_maktu_hakedis(dt_from.year, dt_from.month, toplam_normal_saat, maas)
                     hakedis = maktu['hakedis']
                     saat_ucreti = maktu['gunluk_ucret']
                     mesai_saat_ucreti = maas / 225.0 if maas > 0 else 0
@@ -911,8 +910,8 @@ class DashboardPage(QWidget):
                     brut = total_yevmiye_rounded * gunluk_yevmiye
                     saat_ucreti = gunluk_yevmiye
                 else:
-                    calisan_gun_sayisi_row = len(df[(df['Personel'] == p) & (df['Normal'] > 0)])
-                    maktu = hesapla_maktu_hakedis(dt_from.year, dt_from.month, calisan_gun_sayisi_row, maas)
+                    toplam_normal_saat = df[df['Personel'] == p]['Normal'].sum()
+                    maktu = hesapla_maktu_hakedis(dt_from.year, dt_from.month, toplam_normal_saat, maas)
                     hakedis = maktu['hakedis']
                     saat_ucreti = maktu['gunluk_ucret']
                     mesai_saat_ucreti = maas / 225.0 if maas > 0 else 0

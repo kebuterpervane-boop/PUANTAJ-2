@@ -23,12 +23,25 @@ class HesaplamaTests(unittest.TestCase):
         self.assertIsNone(parse_time_to_minutes("not-a-time"))
 
     def test_maktu_hakedis_30_gun_kurali(self):
-        result = hesapla_maktu_hakedis(2025, 2, 20, 30000)
+        # 20 gün * 7.5 saat = 150 saat çalışıldı
+        result = hesapla_maktu_hakedis(2025, 2, 150.0, 30000)
         self.assertEqual(result["ayin_gercek_gun_sayisi"], 28)
-        self.assertEqual(result["eksik_gun"], 8)
-        self.assertEqual(result["odemeye_esas_gun"], 22)
+        self.assertEqual(result["eksik_gun"], 8.0)
+        self.assertEqual(result["odemeye_esas_gun"], 22.0)
         self.assertEqual(result["gunluk_ucret"], 1000.0)
         self.assertEqual(result["hakedis"], 22000.0)
+
+    def test_maktu_hakedis_kismi_gun_eksikligi(self):
+        # Şubat 2026: 28 gün, 175.5 saat çalışıldı (bazı günlerde ceza kesintisi)
+        # Eksik saat = 28*7.5 - 175.5 = 34.5, eksik gün = 4.6
+        # Ödemeye esas gün = 30 - 4.6 = 25.4
+        # Hakediş = (54000/30) * 25.4 = 1800 * 25.4 = 45720
+        result = hesapla_maktu_hakedis(2026, 2, 175.5, 54000)
+        self.assertEqual(result["ayin_gercek_gun_sayisi"], 28)
+        self.assertEqual(result["eksik_gun"], 4.6)
+        self.assertEqual(result["odemeye_esas_gun"], 25.4)
+        self.assertEqual(result["gunluk_ucret"], 1800.0)
+        self.assertEqual(result["hakedis"], 45720.0)
 
     def test_hakedis_pazar_gelmedi_maasli(self):
         pazar = _find_weekday("2025-01-01", 6)
