@@ -185,8 +185,8 @@ def hesapla_hakedis(tarih_str, giris_str, cikis_str, kayip_sure_str, holiday_set
                     tur, normal_ref, mesai_ref = info
                     # Yevmiyeci: Gelmediyse 0
                     if yevmiyeci_mi: return 0.0, 0.0, f"{tur} (Gelmedi)"
-                    # Maktu: Tatil ücreti ödenir
-                    return normal_ref, mesai_ref, f"{tur} (Gelmedi)"
+                    # Maktu: Tatil ücreti ödenir (mesai sadece gelene verilir)
+                    return normal_ref, 0.0, f"{tur} (Gelmedi)"
             return (0.0 if yevmiyeci_mi else NORMAL_GUNLUK_SAAT), 0.0, "Resmi Tatil"
         else:
             # Hafta içi gelmedi

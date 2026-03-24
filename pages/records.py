@@ -877,7 +877,11 @@ class RecordsPage(QWidget):
                 updates.append((normal, mesai, desc, rec_id))
             # Toplu DB güncelle
             if updates:
-                self.db.bulk_update_hakedis(updates)
+                # Elle yapılan müdahaleler (tam gün, sıfırla) kilitlensin
+                if action_type in ("full_day", "reset"):
+                    self.db.bulk_update_hakedis(updates, lock=True)
+                else:
+                    self.db.bulk_update_hakedis(updates)
             self.table.blockSignals(False)
             self.signal_manager.data_updated.emit()
         except Exception as e:
@@ -927,7 +931,7 @@ class RecordsPage(QWidget):
                 try:
                     dt = datetime.strptime(row[1], "%Y-%m-%d")
                     ay_gun = dt.strftime("%m-%d")
-                    is_holiday = ay_gun in holiday_set
+                    is_holiday = (row[1] in holiday_set) or (ay_gun in holiday_set)
                 except (ValueError, TypeError):
                     is_holiday = False
                 if is_holiday or "Pazar" in (row[8] or ""):
@@ -1649,7 +1653,8 @@ class RecordsPage(QWidget):
                 def _day_fill(day_num):
                     dt = datetime(year, month, day_num)
                     key = dt.strftime("%m-%d")
-                    if key in holiday_set:
+                    full_key = dt.strftime("%Y-%m-%d")
+                    if key in holiday_set or full_key in holiday_set:
                         return holiday_fill
                     if dt.weekday() >= 5:
                         return weekend_fill

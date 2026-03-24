@@ -102,15 +102,22 @@ class Database:
         kilit_db.unlock_month(year, month, firma_id)  # WHY: preserve original unlock behavior; only import fixed.
 
 
-    def bulk_update_hakedis(self, updates):
+    def bulk_update_hakedis(self, updates, lock=False):
         """
         updates: List of (normal, mesai, aciklama, rec_id)
+        lock: True ise manuel_kilit=1 set eder (elle yapılan müdahalelerde)
         """
         with self.get_connection() as conn:
-            conn.executemany(
-                "UPDATE gunluk_kayit SET hesaplanan_normal=?, hesaplanan_mesai=?, aciklama=? WHERE id=?",
-                updates
-            )
+            if lock:
+                conn.executemany(
+                    "UPDATE gunluk_kayit SET hesaplanan_normal=?, hesaplanan_mesai=?, aciklama=?, manuel_kilit=1 WHERE id=?",
+                    updates
+                )
+            else:
+                conn.executemany(
+                    "UPDATE gunluk_kayit SET hesaplanan_normal=?, hesaplanan_mesai=?, aciklama=? WHERE id=?",
+                    updates
+                )
             conn.commit()
 
     def __init__(self, db_file=None, use_cache=True):
@@ -810,6 +817,10 @@ class Database:
         try: dt = datetime.strptime(tarih, "%Y-%m-%d"); tarih_key = dt.strftime("%m-%d")
         except Exception: tarih_key = tarih
         with self.get_connection() as conn:
+            # Önce tam tarih (YYYY-MM-DD) ile ara (dini tatiller), sonra MM-DD (sabit tatiller)
+            row = conn.execute("SELECT tur, normal_saat, mesai_saat FROM resmi_tatiller WHERE tarih=?", (tarih,)).fetchone()
+            if row:
+                return row
             return conn.execute("SELECT tur, normal_saat, mesai_saat FROM resmi_tatiller WHERE tarih=?", (tarih_key,)).fetchone()
 
 
@@ -1307,8 +1318,13 @@ class Database:
     def update_single_record(self, record_id, col_name, new_value):
         allowed_cols = ['kayip_sure_saat', 'hesaplanan_normal', 'hesaplanan_mesai', 'aciklama']
         if col_name not in allowed_cols: return False
+        # Elle düzenlenen hesaplama sütunlarını kilitle (yeniden hesaplamada ezilmesin)
+        lock_cols = ('hesaplanan_normal', 'hesaplanan_mesai')
         with self.get_connection() as conn:
-            conn.execute(f"UPDATE gunluk_kayit SET {col_name} = ? WHERE id = ?", (new_value, record_id))
+            if col_name in lock_cols:
+                conn.execute(f"UPDATE gunluk_kayit SET {col_name} = ?, manuel_kilit = 1 WHERE id = ?", (new_value, record_id))
+            else:
+                conn.execute(f"UPDATE gunluk_kayit SET {col_name} = ? WHERE id = ?", (new_value, record_id))
             conn.commit()
             return True
 
