@@ -796,16 +796,14 @@ class Database:
     # --- TATİL YÖNETİMİ (EKSİK OLAN KISIMLAR) ---
 
     def add_holiday(self, tarih, tur, normal_saat, mesai_saat, aciklama):
-        try:
-            dt = datetime.strptime(tarih, "%Y-%m-%d")
-            tarih_key = dt.strftime("%m-%d")
-        except Exception:
-            tarih_key = tarih
+        # tarih geldiği formatta saklanır (MM-DD veya YYYY-MM-DD).
+        # Sabit ulusal tatiller → MM-DD, dini/yıla özgü tatiller → YYYY-MM-DD.
+        # Dönüşüm gerekiyorsa çağıran taraf yapmalı (örn. import_nager_holidays).
         with self.get_connection() as conn:
             conn.execute("INSERT OR REPLACE INTO resmi_tatiller (tarih, tur, normal_saat, mesai_saat, aciklama) VALUES (?, ?, ?, ?, ?)",
-                            (tarih_key, tur, normal_saat, mesai_saat, aciklama))
+                            (tarih, tur, normal_saat, mesai_saat, aciklama))
             conn.commit()
-        self.update_records_for_holiday(tarih_key)
+        self.update_records_for_holiday(tarih)
 
 
     def get_all_holidays(self):

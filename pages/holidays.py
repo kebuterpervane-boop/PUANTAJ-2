@@ -234,9 +234,14 @@ class HolidaysPage(QWidget):
         count = 0
         for h in holidays:
             try:
-                date_str = h.get("date", "")  # "2025-01-01" — YYYY-MM-DD, yıla özgü
+                date_str = h.get("date", "")  # "2025-01-01" — YYYY-MM-DD
                 name = h.get("localName") or h.get("name") or "Tatil"
-                self.db.add_holiday(date_str, "Resmi Tatil", 7.5, 0, name)
+                # Sabit ulusal tatiller her yıl aynı günde olduğundan MM-DD olarak sakla.
+                try:
+                    mm_dd = datetime.strptime(date_str, "%Y-%m-%d").strftime("%m-%d")
+                except Exception:
+                    mm_dd = date_str
+                self.db.add_holiday(mm_dd, "Resmi Tatil", 7.5, 0, name)
                 count += 1
             except Exception:
                 pass  # WHY: tekrar ekleme veya format hatalarını atla.
