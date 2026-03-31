@@ -1,7 +1,8 @@
 from datetime import datetime
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
-                              QTableWidgetItem, QHeaderView, QPushButton, 
-                              QLabel, QComboBox, QMessageBox, QSpinBox)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
+                              QTableWidgetItem, QHeaderView, QPushButton,
+                              QLabel, QComboBox, QMessageBox, QSpinBox,
+                              QDialog, QDialogButtonBox, QGroupBox, QGridLayout)
 from PySide6.QtWidgets import QFileDialog  # WHY: save dialog for export output.
 from PySide6.QtWidgets import QProgressDialog  # WHY: show export progress without freezing UI.
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QObject  # NEW: threading helpers for smooth UI.
@@ -289,7 +290,12 @@ class RaporlarPage(QWidget):
         btn_yazdir.setStyleSheet("background-color: #2196F3; color: white; padding: 8px;")
         btn_yazdir.clicked.connect(self.print_report)
         btn_layout.addWidget(btn_yazdir)
-        
+
+        btn_icmal = QPushButton("📋 SGK Mesai İcmal")
+        btn_icmal.setStyleSheet("background-color: #7B1FA2; color: white; padding: 8px; font-weight: bold;")
+        btn_icmal.clicked.connect(self.export_sgk_icmal)
+        btn_layout.addWidget(btn_icmal)
+
         layout.addLayout(btn_layout)
 
     def load_data(self):
@@ -762,3 +768,356 @@ class RaporlarPage(QWidget):
 
     def print_report(self):
         QMessageBox.information(self, "Yazdırma", "Yazdırma özelliği yakında gelecek.")
+
+    # ------------------------------------------------------------------
+    # SGK MESAİ İCMAL
+    # ------------------------------------------------------------------
+
+    def export_sgk_icmal(self):
+        """SGK için Luca formatında aylık mesai icmal tablosunu Excel'e aktarır."""
+        dlg = _SgkIcmalDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        bas_yil, bas_ay, bit_yil, bit_ay = dlg.get_period()
+        tersane_id = self.tersane_id
+        tersane_label = self._get_active_tersane_label()
+
+        # Dönem içindeki ay listesini oluştur
+        ay_listesi = []
+        y, m = bas_yil, bas_ay
+        while (y, m) <= (bit_yil, bit_ay):
+            ay_listesi.append((y, m))
+            m += 1
+            if m > 12:
+                m = 1
+                y += 1
+
+        ay_etiketler = [f"{_ay_adi(m)} {y}" for y, m in ay_listesi]
+
+        cfg = load_config()
+        last_dir = cfg.get("last_export_dir", "")
+        filename = f"SGK_Mesai_Icmal_{bas_yil}{bas_ay:02d}-{bit_yil}{bit_ay:02d}.xlsx"
+        default_path = os.path.join(last_dir, filename) if last_dir else filename
+        path, _ = QFileDialog.getSaveFileName(self, "İcmali Kaydet", default_path, "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            cfg["last_export_dir"] = os.path.dirname(path)
+            save_config(cfg)
+        except Exception:
+            pass
+
+        db = self.db
+
+        def _task(worker):
+            # Personel listesini çek
+            with db.get_connection() as conn:
+                c = conn.cursor()
+                if tersane_id and tersane_id > 0:
+                    personel_rows = c.execute(
+                        "SELECT ad_soyad, ise_baslangic, "
+                        "CASE WHEN gorevi IS NOT NULL AND TRIM(gorevi)!='' THEN gorevi ELSE COALESCE(ekip_adi,'') END "
+                        "FROM personel WHERE tersane_id=? ORDER BY ad_soyad",
+                        (tersane_id,)
+                    ).fetchall()
+                else:
+                    personel_rows = c.execute(
+                        "SELECT ad_soyad, ise_baslangic, "
+                        "CASE WHEN gorevi IS NOT NULL AND TRIM(gorevi)!='' THEN gorevi ELSE COALESCE(ekip_adi,'') END "
+                        "FROM personel ORDER BY ad_soyad"
+                    ).fetchall()
+
+                # Her personel için aylık FM toplamlarını çek
+                # SGK/denetim formatı — iki ayrı durum:
+                #   1. Normal mesai günleri: hesaplanan_mesai / 1.5  (sistem 1.5x uygulamış)
+                #   2. Tatil/Pazar çalışma:  7.5 saat sabit          (gerçek bir günlük çalışma)
+                TATIL_SQL = """
+                    SELECT
+                        COALESCE(SUM(CASE
+                            WHEN (aciklama LIKE '%Tatil%' OR aciklama LIKE '%Pazar%')
+                                 AND hesaplanan_mesai > 0
+                            THEN 7.5 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE
+                            WHEN (aciklama NOT LIKE '%Tatil%' AND aciklama NOT LIKE '%Pazar%')
+                            THEN hesaplanan_mesai ELSE 0 END), 0)
+                    FROM gunluk_kayit
+                    WHERE ad_soyad=? AND tarih LIKE ?
+                """
+                TATIL_SQL_T = TATIL_SQL.replace(
+                    "WHERE ad_soyad=? AND tarih LIKE ?",
+                    "WHERE ad_soyad=? AND tarih LIKE ? AND tersane_id=?"
+                )
+                tablo = []
+                for idx, (ad_soyad, ise_bas, ekip) in enumerate(personel_rows, start=1):
+                    if worker.should_stop():
+                        return {"status": "cancelled"}
+                    aylik_fm = []
+                    toplam_fm = 0.0
+                    for yil, ay in ay_listesi:
+                        ay_str = f"{yil}-{ay:02d}"
+                        if tersane_id and tersane_id > 0:
+                            row = c.execute(TATIL_SQL_T, (ad_soyad, f"{ay_str}%", tersane_id)).fetchone()
+                        else:
+                            row = c.execute(TATIL_SQL, (ad_soyad, f"{ay_str}%")).fetchone()
+                        tatil_saat = row[0] if row else 0.0
+                        normal_raw = row[1] if row else 0.0
+                        fm_val = round(tatil_saat + (normal_raw / 1.5), 2) if (tatil_saat or normal_raw) else 0.0
+                        aylik_fm.append(fm_val)
+                        toplam_fm += fm_val
+                    tablo.append({
+                        "sira": idx,
+                        "ad_soyad": ad_soyad,
+                        "ise_baslangic": ise_bas or "",
+                        "gorevi": ekip or "",
+                        "aylik_fm": aylik_fm,
+                        "toplam_fm": toplam_fm,
+                    })
+
+            _yaz_icmal_excel(path, tablo, ay_listesi, ay_etiketler, tersane_label)
+            return {"status": "ok", "path": path}
+
+        def _done(result):
+            if not result or result.get("status") == "cancelled":
+                return
+            QMessageBox.information(self, "Başarılı", f"SGK Mesai İcmal kaydedildi:\n{result.get('path', path)}")
+
+        self._start_export_worker(_task, done_cb=_done, label="SGK Mesai İcmal hazırlanıyor...")
+
+
+# ------------------------------------------------------------------
+# Yardımcı: ay adları
+# ------------------------------------------------------------------
+
+def _ay_adi(ay_no):
+    return ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+            "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"][ay_no - 1]
+
+
+# ------------------------------------------------------------------
+# Yardımcı: dönem seçim dialogu
+# ------------------------------------------------------------------
+
+class _SgkIcmalDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("SGK Mesai İcmal - Dönem Seçimi")
+        self.setMinimumWidth(340)
+        layout = QVBoxLayout(self)
+
+        grp = QGroupBox("Dönem")
+        grid = QGridLayout(grp)
+        aylar = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+                 "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+        yillar = [str(y) for y in range(2023, 2031)]
+        bugun = datetime.now()
+
+        grid.addWidget(QLabel("Başlangıç Ay:"), 0, 0)
+        self.cb_bas_ay = QComboBox(); self.cb_bas_ay.addItems(aylar)
+        self.cb_bas_ay.setCurrentIndex(bugun.month - 2 if bugun.month > 1 else 0)
+        grid.addWidget(self.cb_bas_ay, 0, 1)
+
+        grid.addWidget(QLabel("Başlangıç Yıl:"), 0, 2)
+        self.cb_bas_yil = QComboBox(); self.cb_bas_yil.addItems(yillar)
+        self.cb_bas_yil.setCurrentText(str(bugun.year))
+        grid.addWidget(self.cb_bas_yil, 0, 3)
+
+        grid.addWidget(QLabel("Bitiş Ay:"), 1, 0)
+        self.cb_bit_ay = QComboBox(); self.cb_bit_ay.addItems(aylar)
+        self.cb_bit_ay.setCurrentIndex(bugun.month - 1)
+        grid.addWidget(self.cb_bit_ay, 1, 1)
+
+        grid.addWidget(QLabel("Bitiş Yıl:"), 1, 2)
+        self.cb_bit_yil = QComboBox(); self.cb_bit_yil.addItems(yillar)
+        self.cb_bit_yil.setCurrentText(str(bugun.year))
+        grid.addWidget(self.cb_bit_yil, 1, 3)
+
+        layout.addWidget(grp)
+
+        note = QLabel("SGK/denetim formatı: gerçek çalışılan saat (1.5x ücret katsayısı dahil değil).\nÖrn: 3 saat fazla mesai → icmalde 3 yazar.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #aaa; font-size: 11px;")
+        layout.addWidget(note)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._validate_and_accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _validate_and_accept(self):
+        bas_y, bas_m = int(self.cb_bas_yil.currentText()), self.cb_bas_ay.currentIndex() + 1
+        bit_y, bit_m = int(self.cb_bit_yil.currentText()), self.cb_bit_ay.currentIndex() + 1
+        if (bas_y, bas_m) > (bit_y, bit_m):
+            QMessageBox.warning(self, "Hata", "Başlangıç tarihi bitiş tarihinden sonra olamaz.")
+            return
+        if (bit_y * 12 + bit_m) - (bas_y * 12 + bas_m) > 23:
+            QMessageBox.warning(self, "Hata", "En fazla 24 aylık dönem seçilebilir.")
+            return
+        self.accept()
+
+    def get_period(self):
+        return (int(self.cb_bas_yil.currentText()), self.cb_bas_ay.currentIndex() + 1,
+                int(self.cb_bit_yil.currentText()), self.cb_bit_ay.currentIndex() + 1)
+
+
+# ------------------------------------------------------------------
+# Excel yazıcı: SGK Mesai İcmal
+# ------------------------------------------------------------------
+
+def _yaz_icmal_excel(path, tablo, ay_listesi, ay_etiketler, tersane_label):
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, GradientFill
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Mesai İcmal"
+
+    # Renk paleti
+    LACIVERT   = "1A237E"   # başlık
+    KOYU_MOR   = "4A148C"   # sabit sütun başlıkları
+    KOYU_MAVI  = "283593"   # ay başlıkları
+    TOPLAM_KOL = "880E4F"   # TOPLAM FM sütunu
+    SARI_VURGU = "FFF9C4"   # toplam satırı
+    ZEBRA_KOYU = "E8EAF6"   # çift satırlar
+    BEYAZ      = "FFFFFF"
+    YAZI_BEYAZ = "FFFFFF"
+    YAZI_KOYU  = "1A1A2E"
+
+    thin  = Side(border_style="thin",   color="BBBBCC")
+    med   = Side(border_style="medium", color="555577")
+    thick = Side(border_style="medium", color=LACIVERT)
+
+    def stil(cell, bg=None, bold=False, renk=YAZI_KOYU, hizala="center", wrap=False, border=None, size=10):
+        if bg:
+            cell.fill = PatternFill(start_color=bg, end_color=bg, fill_type="solid")
+        cell.font = Font(bold=bold, color=renk, size=size, name="Calibri")
+        cell.alignment = Alignment(horizontal=hizala, vertical="center", wrap_text=wrap)
+        b = border or Border(left=thin, right=thin, top=thin, bottom=thin)
+        cell.border = b
+
+    n_ay = len(ay_listesi)
+    # Sütun düzeni: A=Sıra, B=Ad Soyadı, C=İşe Giriş, D=Görevi, E..E+n-1=Aylar, E+n=TOPLAM
+    COL_SIRA   = 1
+    COL_AD     = 2
+    COL_GIRIS  = 3
+    COL_GOREVI = 4
+    COL_AY_BAS = 5
+    COL_TOPLAM = COL_AY_BAS + n_ay
+
+    TOPLAM_SUTUN = COL_TOPLAM
+    SON_SUTUN    = COL_TOPLAM
+
+    # --- Satır 1: Ana başlık ---
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=SON_SUTUN)
+    c = ws.cell(row=1, column=1)
+    c.value = f"FAZLA MESAİ İCMAL CETVELİ  —  {tersane_label}"
+    stil(c, bg=LACIVERT, bold=True, renk=BEYAZ, size=13)
+    ws.row_dimensions[1].height = 26
+
+    # --- Satır 2: Alt bilgi ---
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=SON_SUTUN)
+    c = ws.cell(row=2, column=1)
+    c.value = f"Dönem: {ay_etiketler[0]} – {ay_etiketler[-1]}   |   Oluşturulma: {datetime.now().strftime('%d.%m.%Y %H:%M')}   |   SGK Denetim Formatı (gerçek saat)"
+    stil(c, bg="303F9F", bold=False, renk="C5CAE9", size=9)
+    ws.row_dimensions[2].height = 16
+
+    # --- Satır 3: Boş ayraç ---
+    ws.row_dimensions[3].height = 6
+
+    # --- Satır 4: Sütun başlıkları ---
+    baslik_data = [
+        (COL_SIRA,   "Sıra",            8),
+        (COL_AD,     "Ad Soyadı",       28),
+        (COL_GIRIS,  "İşe Giriş",       13),
+        (COL_GOREVI, "Görevi / Ekip",   18),
+    ]
+    for col, metin, genislik in baslik_data:
+        c = ws.cell(row=4, column=col, value=metin)
+        stil(c, bg=KOYU_MOR, bold=True, renk=BEYAZ)
+        ws.column_dimensions[get_column_letter(col)].width = genislik
+
+    for i, etiket in enumerate(ay_etiketler):
+        col = COL_AY_BAS + i
+        c = ws.cell(row=4, column=col, value=etiket)
+        stil(c, bg=KOYU_MAVI, bold=True, renk=BEYAZ)
+        ws.column_dimensions[get_column_letter(col)].width = 12
+
+    c = ws.cell(row=4, column=COL_TOPLAM, value="TOPLAM FM")
+    stil(c, bg=TOPLAM_KOL, bold=True, renk=BEYAZ)
+    ws.column_dimensions[get_column_letter(COL_TOPLAM)].width = 13
+
+    ws.row_dimensions[4].height = 22
+    ws.freeze_panes = ws.cell(row=5, column=COL_AY_BAS)
+
+    # --- Veri satırları ---
+    for satir_idx, kayit in enumerate(tablo):
+        row = 5 + satir_idx
+        zebra = ZEBRA_KOYU if satir_idx % 2 == 0 else BEYAZ
+
+        vals = [
+            (COL_SIRA,   kayit["sira"],         "center"),
+            (COL_AD,     kayit["ad_soyad"],      "left"),
+            (COL_GIRIS,  kayit["ise_baslangic"], "center"),
+            (COL_GOREVI, kayit["gorevi"],        "left"),
+        ]
+        for col, val, hizala in vals:
+            c = ws.cell(row=row, column=col, value=val)
+            stil(c, bg=zebra, hizala=hizala)
+
+        for i, fm_val in enumerate(kayit["aylik_fm"]):
+            col = COL_AY_BAS + i
+            c = ws.cell(row=row, column=col, value=round(fm_val, 2) if fm_val else "")
+            c.number_format = "0.00"
+            stil(c, bg=zebra)
+
+        c = ws.cell(row=row, column=COL_TOPLAM, value=round(kayit["toplam_fm"], 2))
+        c.number_format = "0.00"
+        stil(c, bg="FCE4EC", bold=True,
+             border=Border(left=med, right=med, top=thin, bottom=thin))
+
+        ws.row_dimensions[row].height = 17
+
+    # --- Toplam satırı ---
+    toplam_row = 5 + len(tablo)
+    ws.row_dimensions[toplam_row].height = 20
+
+    c = ws.cell(row=toplam_row, column=COL_SIRA, value="")
+    stil(c, bg=SARI_VURGU, bold=True)
+    ws.merge_cells(start_row=toplam_row, start_column=COL_AD, end_row=toplam_row, end_column=COL_GOREVI)
+    c = ws.cell(row=toplam_row, column=COL_AD, value="GENEL TOPLAM")
+    stil(c, bg=SARI_VURGU, bold=True, hizala="right")
+
+    genel_toplam = 0.0
+    for i in range(n_ay):
+        col = COL_AY_BAS + i
+        ay_top = sum(k["aylik_fm"][i] for k in tablo)
+        c = ws.cell(row=toplam_row, column=col, value=round(ay_top, 2))
+        c.number_format = "0.00"
+        stil(c, bg=SARI_VURGU, bold=True)
+        genel_toplam += ay_top
+
+    c = ws.cell(row=toplam_row, column=COL_TOPLAM, value=round(genel_toplam, 2))
+    c.number_format = "0.00"
+    stil(c, bg="F8BBD0", bold=True, size=11,
+         border=Border(left=med, right=med, top=med, bottom=med))
+
+    # --- Dış çerçeve (tablo etrafı) ---
+    from openpyxl.styles import Border as OBorder
+    son_veri_satiri = toplam_row
+    for row in ws.iter_rows(min_row=4, max_row=son_veri_satiri,
+                            min_col=1, max_col=SON_SUTUN):
+        for cell in row:
+            top_b    = med if cell.row == 4 else cell.border.top
+            bottom_b = med if cell.row == son_veri_satiri else cell.border.bottom
+            left_b   = med if cell.column == 1 else cell.border.left
+            right_b  = med if cell.column == SON_SUTUN else cell.border.right
+            cell.border = OBorder(top=top_b, bottom=bottom_b, left=left_b, right=right_b)
+
+    # Yazdırma ayarları
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToPage  = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+
+    wb.save(path)

@@ -85,7 +85,7 @@ class UploadWorker(QObject):
                     if fc:
                         df = df[df[fc].astype(str).str.strip().apply(tr_lower) == tr_lower(self.firma_filter_name).strip()].reset_index(drop=True)
                 try:
-                    cols = {k: None for k in ['tarih', 'ad', 'giris', 'cikis', 'kayip']}
+                    cols = {k: None for k in ['tarih', 'ad', 'giris', 'cikis', 'kayip', 'gorevi']}
                     for c in df.columns:
                         cl = tr_lower(str(c))
                         if 'tarih' in cl: cols['tarih'] = c
@@ -93,10 +93,12 @@ class UploadWorker(QObject):
                         elif 'giris' in cl or 'giriş' in cl: cols['giris'] = c
                         elif 'cikis' in cl or 'çıkış' in cl: cols['cikis'] = c
                         elif 'kayip' in cl or 'kayıp' in cl: cols['kayip'] = c
+                        elif 'gorev' in cl or 'görevi' in cl or 'unvan' in cl or 'pozisyon' in cl: cols['gorevi'] = c
                     if not cols['tarih'] or not cols['ad']:
                         self.error.emit(f"<span style='color:#EF5350;'>HATA ({os.path.basename(fname)}): 'Tarih' veya 'Ad Soyad' sutunu tespit edilemedi.</span>")
                         continue
                     batch_data = []
+                    ad_gorev_map = {}  # ad -> gorevi (ilk bulunan değer yeterli)
                     row_count = len(df)
                     for i, row in enumerate(df.iterrows()):
                         try:
@@ -122,6 +124,12 @@ class UploadWorker(QObject):
                             if record_key in self.skip_keys:
                                 skipped_count += 1
                                 continue
+
+                            # Görevi varsa ve henüz bu personel için kaydetmedikse sakla
+                            if cols['gorevi'] and ad not in ad_gorev_map:
+                                g_val = row[1].get(cols['gorevi'])
+                                if g_val and str(g_val).strip() not in ('', 'nan', 'NaN'):
+                                    ad_gorev_map[ad] = str(g_val).strip()
 
                             giris = normalize_time_cell(row[1].get(cols['giris']))
                             cikis = normalize_time_cell(row[1].get(cols['cikis']))
@@ -163,6 +171,12 @@ class UploadWorker(QObject):
                                             (self.tersane_id, ad, self.tersane_id)
                                         )
                                 conn.commit()
+                            # Görevi boş olan personelleri doldur (dolu olanları dokunma)
+                            if ad_gorev_map:
+                                try:
+                                    db.update_gorevi_bulk_if_empty(list(ad_gorev_map.items()))
+                                except Exception:
+                                    pass
                             total_saved += len(batch_data)
                         except Exception as e:
                             self.error.emit(f"<span style='color:#EF5350;'>VERITABANI HATASI ({os.path.basename(fname)}): {str(e)}</span>")

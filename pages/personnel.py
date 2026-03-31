@@ -36,7 +36,7 @@ class PersonnelSaveWorker(QObject):
                     t['ad'], t['maas'], t['ekip'], t.get('ozel'), t.get('ekstra', 0.0),
                     t.get('izin_hakki', 0.0), t.get('ise_baslangic'), t.get('cikis_tarihi'),
                     t.get('ekstra_not'), t.get('avans_not'), t.get('yevmiyeci_mi', 0),
-                    tersane_id=t.get('tersane_id')
+                    tersane_id=t.get('tersane_id'), gorevi=t.get('gorevi', '')
                 )
                 # Aylık ekstra varsa ayrı tabloya kaydet.
                 if t.get('aylik_ekstra') is not None and t.get('aylik_ekstra_yil') and t.get('aylik_ekstra_ay'):
@@ -139,13 +139,20 @@ class PersonnelPage(QWidget):
         self.input_ekip.setPlaceholderText("Ekip (Örn: Kaynak)")
         self.input_ekip.setStyleSheet("padding: 5px; color: white;")
         self.input_ekip.setMinimumWidth(120)
-        
+
+        self.input_gorevi = QLineEdit()
+        self.input_gorevi.setPlaceholderText("Görevi (Örn: Kaynakçı Usta)")
+        self.input_gorevi.setStyleSheet("padding: 5px; color: white;")
+        self.input_gorevi.setMinimumWidth(140)
+
         row1.addWidget(QLabel("📝 Yeni Personel:"))
         row1.addWidget(self.input_ad)
         row1.addWidget(QLabel("Maaş:"))
         row1.addWidget(self.input_maas)
         row1.addWidget(QLabel("Ekip:"))
         row1.addWidget(self.input_ekip)
+        row1.addWidget(QLabel("Görevi:"))
+        row1.addWidget(self.input_gorevi)
         row1.addStretch()
         add_layout.addLayout(row1)
 
@@ -299,15 +306,18 @@ class PersonnelPage(QWidget):
         layout.addWidget(self.search_input)
 
         # TABLO
+        # Sütunlar: 0=Ad Soyad, 1=Maaş, 2=Ekip, 3=Görevi, 4=Ekstra, 5=Ekstra Not,
+        #           6=Özel Durum, 7=Yıllık İzin, 8=İşe Başlangıç, 9=Çıkış,
+        #           10=Avans Not, 11=Yevmiyeci, 12=Tersane
         self.table = QTableWidget()
-        # Sütunlar: Ad Soyad, Maaş, Ekip, Ekstra, Ekstra Not, Özel Durum, Yıllık İzin, İşe Başlangıç, Çıkış, Avans Not, Yevmiyeci, Tersane
-        self.table.setColumnCount(12)
-        self.table.setHorizontalHeaderLabels(["Ad Soyad", "Maaş (₺)", "Ekip", "Ekstra (₺)", "Ekstra Açıklaması", "Özel Durum", "Yıllık İzin", "İşe Başlangıç", "Çıkış", "Avans Açıklaması", "Yevmiyeci", "Tersane"])
+        self.table.setColumnCount(13)
+        self.table.setHorizontalHeaderLabels(["Ad Soyad", "Maaş (₺)", "Ekip", "Görevi", "Ekstra (₺)", "Ekstra Açıklaması", "Özel Durum", "Yıllık İzin", "İşe Başlangıç", "Çıkış", "Avans Açıklaması", "Yevmiyeci", "Tersane"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(10, QHeaderView.Stretch)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #212121; color: white; gridline-color: #424242; alternate-background-color: #2a2a2a; }
@@ -390,7 +400,7 @@ class PersonnelPage(QWidget):
             ekstra_aylik_map = self.db.get_ekstra_aylik_bulk(year, month, tersane_id=self.tersane_id)
 
         for row, row_data in enumerate(data):
-            # row_data: (ad, maas, ekip, ozel, ekstra, izin_hakki, ise_baslangic, cikis_tarihi, ekstra_not, avans_not, yevmiyeci_mi)
+            # row_data: (ad, maas, ekip, ozel, ekstra, izin_hakki, ise_baslangic, cikis_tarihi, ekstra_not, avans_not, yevmiyeci_mi, gorevi)
             ad = row_data[0]
             maas = row_data[1]
             ekip = row_data[2]
@@ -400,6 +410,7 @@ class PersonnelPage(QWidget):
             cikis_tarihi = row_data[7]
             avans_not = row_data[9] if len(row_data) > 9 else ""
             yevmiyeci_mi = row_data[10] if len(row_data) > 10 else 0
+            gorevi = row_data[11] if len(row_data) > 11 else ""
             # Aylık moda özel ekstra; Tüm Dönem ise personel tablosundaki kalıcı ekstra gösterilir
             if ekstra_aylik_map:
                 aylik = ekstra_aylik_map.get(ad)
@@ -414,14 +425,15 @@ class PersonnelPage(QWidget):
             self.table.setItem(row, 0, item_ad)
             self.table.setItem(row, 1, QTableWidgetItem(str(maas)))
             self.table.setItem(row, 2, QTableWidgetItem(ekip if ekip else ""))
-            self.table.setItem(row, 3, QTableWidgetItem(f"{ekstra:.2f}"))
-            self.table.setItem(row, 4, QTableWidgetItem(ekstra_not or ""))
-            self.table.setItem(row, 5, QTableWidgetItem(ozel if ozel else "Yok"))
-            self.table.setItem(row, 6, QTableWidgetItem(f"{izin_hakki:.1f}"))
-            self.table.setItem(row, 7, QTableWidgetItem(ise_baslangic or ""))
-            self.table.setItem(row, 8, QTableWidgetItem(cikis_tarihi or ""))
-            self.table.setItem(row, 9, QTableWidgetItem(avans_not or ""))
-            self.table.setItem(row, 10, QTableWidgetItem("✓" if yevmiyeci_mi else ""))
+            self.table.setItem(row, 3, QTableWidgetItem(gorevi or ""))
+            self.table.setItem(row, 4, QTableWidgetItem(f"{ekstra:.2f}"))
+            self.table.setItem(row, 5, QTableWidgetItem(ekstra_not or ""))
+            self.table.setItem(row, 6, QTableWidgetItem(ozel if ozel else "Yok"))
+            self.table.setItem(row, 7, QTableWidgetItem(f"{izin_hakki:.1f}"))
+            self.table.setItem(row, 8, QTableWidgetItem(ise_baslangic or ""))
+            self.table.setItem(row, 9, QTableWidgetItem(cikis_tarihi or ""))
+            self.table.setItem(row, 10, QTableWidgetItem(avans_not or ""))
+            self.table.setItem(row, 11, QTableWidgetItem("✓" if yevmiyeci_mi else ""))
             # Tersane dropdown
             tersane_id_for_row, _ = self._get_tersane_info_for_personel(ad)
             combo_t = QComboBox()
@@ -434,7 +446,7 @@ class PersonnelPage(QWidget):
                 combo_t.setCurrentIndex(idx_t)
             combo_t.blockSignals(False)
             combo_t.currentIndexChanged.connect(lambda _, r=row: self._changed_rows.add(r))
-            self.table.setCellWidget(row, 11, combo_t)
+            self.table.setCellWidget(row, 12, combo_t)
 
         if sorting:
             self.table.setSortingEnabled(True)
@@ -453,6 +465,7 @@ class PersonnelPage(QWidget):
             QMessageBox.warning(self, "Hata", maas)
             return
         ekip = self.input_ekip.text().strip()
+        gorevi = self.input_gorevi.text().strip()
         ok, ekstra = ensure_non_negative_number(self.input_ekstra.value(), "Ekstra odeme", default=0)
         if not ok:
             QMessageBox.warning(self, "Hata", ekstra)
@@ -476,7 +489,7 @@ class PersonnelPage(QWidget):
 
         # NEW: background save to keep UI responsive.
         tasks = [{
-            'ad': ad, 'maas': maas, 'ekip': ekip, 'ozel': ozel, 'ekstra': ekstra,
+            'ad': ad, 'maas': maas, 'ekip': ekip, 'gorevi': gorevi, 'ozel': ozel, 'ekstra': ekstra,
             'izin_hakki': izin_hakki, 'ise_baslangic': ise_baslangic, 'cikis_tarihi': cikis_tarihi,
             'ekstra_not': ekstra_not, 'avans_not': avans_not, 'yevmiyeci_mi': yevmiyeci_mi,
             'tersane_id': tersane_id
@@ -485,6 +498,7 @@ class PersonnelPage(QWidget):
             self.input_ad.clear()
             self.input_maas.setValue(0)
             self.input_ekip.clear()
+            self.input_gorevi.clear()
             self.input_ekstra.setValue(0)
             self.input_ekstra_not.clear()
             self.input_avans_not.clear()
@@ -528,31 +542,32 @@ class PersonnelPage(QWidget):
                     if not ok:
                         raise ValueError(maas)
                     ekip = _safe_item_text(row, 2, "")
-                    ok, ekstra = ensure_non_negative_number(_safe_item_text(row, 3, "0"), "Ekstra odeme", default=0)
+                    gorevi = _safe_item_text(row, 3, "")
+                    ok, ekstra = ensure_non_negative_number(_safe_item_text(row, 4, "0"), "Ekstra odeme", default=0)
                     if not ok:
                         raise ValueError(ekstra)
-                    ekstra_not = _safe_item_text(row, 4, "")
-                    ozel = _safe_item_text(row, 5, "Yok")
-                    ok, izin_hakki = ensure_non_negative_number(_safe_item_text(row, 6, "0"), "Yillik izin", default=0)
+                    ekstra_not = _safe_item_text(row, 5, "")
+                    ozel = _safe_item_text(row, 6, "Yok")
+                    ok, izin_hakki = ensure_non_negative_number(_safe_item_text(row, 7, "0"), "Yillik izin", default=0)
                     if not ok:
                         raise ValueError(izin_hakki)
-                    ok, ise_baslangic = ensure_optional_iso_date(_safe_item_text(row, 7, ""), "Ise baslangic")
+                    ok, ise_baslangic = ensure_optional_iso_date(_safe_item_text(row, 8, ""), "Ise baslangic")
                     if not ok:
                         raise ValueError(ise_baslangic)
-                    ok, cikis_tarihi = ensure_optional_iso_date(_safe_item_text(row, 8, ""), "Cikis tarihi")
+                    ok, cikis_tarihi = ensure_optional_iso_date(_safe_item_text(row, 9, ""), "Cikis tarihi")
                     if not ok:
                         raise ValueError(cikis_tarihi)
                     if ise_baslangic and cikis_tarihi and cikis_tarihi < ise_baslangic:
                         raise ValueError("Cikis tarihi ise baslangic tarihinden once olamaz.")
-                    avans_not = _safe_item_text(row, 9, "")
-                    yevmiyeci_text = _safe_item_text(row, 10, "").strip()
+                    avans_not = _safe_item_text(row, 10, "")
+                    yevmiyeci_text = _safe_item_text(row, 11, "").strip()
                     yevmiyeci_mi = 1 if yevmiyeci_text else 0
-                    combo_t = self.table.cellWidget(row, 11)
+                    combo_t = self.table.cellWidget(row, 12)
                     tersane_id = combo_t.currentData() if combo_t else None
                     if ozel == "Yok":
                         ozel = None
                     tasks.append({
-                        'ad': ad, 'maas': maas, 'ekip': ekip, 'ozel': ozel,
+                        'ad': ad, 'maas': maas, 'ekip': ekip, 'gorevi': gorevi, 'ozel': ozel,
                         # Aylık modda ekstra personel tablosuna gitmez; aylik_ekstra alanlarıyla ayrıca kaydedilir.
                         'ekstra': ekstra if all_periods else 0.0,
                         'izin_hakki': izin_hakki, 'ise_baslangic': ise_baslangic,

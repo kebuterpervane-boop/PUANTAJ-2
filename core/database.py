@@ -249,11 +249,13 @@ class Database:
             # ama sorun değil - sadece kullanılmaz.
             # Varsayılan tersane ekle
             c.execute("INSERT OR IGNORE INTO tersane (ad) VALUES ('Varsayılan Tersane')")
-            # personel tablosuna tersane_id ekle
+            # personel tablosuna tersane_id ve gorevi ekle
             c.execute("PRAGMA table_info(personel)")
             personel_cols = [r[1] for r in c.fetchall()]
             if 'tersane_id' not in personel_cols:
                 c.execute("ALTER TABLE personel ADD COLUMN tersane_id INTEGER")
+            if 'gorevi' not in personel_cols:
+                c.execute("ALTER TABLE personel ADD COLUMN gorevi TEXT DEFAULT ''")
             # gunluk_kayit tablosuna tersane_id ekle
             c.execute("PRAGMA table_info(gunluk_kayit)")
             kayit_cols = [r[1] for r in c.fetchall()]
@@ -1128,7 +1130,7 @@ class Database:
                     record_filter += " AND strftime('%Y', g.tarih) = ? AND strftime('%m', g.tarih) = ?"  # WHY: apply period filter on actual work records.
                     record_params += [str(year), f"{month:02d}"]  # WHY: keep same date formatting as elsewhere.
                 c.execute("""SELECT p.ad_soyad, p.maas, p.ekip_adi, p.ozel_durum, p.ekstra_odeme, p.yillik_izin_hakki, p.ise_baslangic, p.cikis_tarihi,
-                                COALESCE(p.ekstra_odeme_not, ''), COALESCE(p.avans_not, ''), COALESCE(p.yevmiyeci_mi, 0)
+                                COALESCE(p.ekstra_odeme_not, ''), COALESCE(p.avans_not, ''), COALESCE(p.yevmiyeci_mi, 0), COALESCE(p.gorevi, '')
                                 FROM personel p
                                 WHERE TRIM(p.ad_soyad) IN (
                                     SELECT DISTINCT TRIM(g.ad_soyad)
@@ -1140,7 +1142,7 @@ class Database:
             if use_records_filter and (not tersane_id or tersane_id <= 0):
                 # WHY: "Genel" modunda tum aktif personeller listelensin (tersane/period filtrelenmez).
                 c.execute("""SELECT p.ad_soyad, p.maas, p.ekip_adi, p.ozel_durum, p.ekstra_odeme, p.yillik_izin_hakki, p.ise_baslangic, p.cikis_tarihi,
-                                COALESCE(p.ekstra_odeme_not, ''), COALESCE(p.avans_not, ''), COALESCE(p.yevmiyeci_mi, 0)
+                                COALESCE(p.ekstra_odeme_not, ''), COALESCE(p.avans_not, ''), COALESCE(p.yevmiyeci_mi, 0), COALESCE(p.gorevi, '')
                                 FROM personel p
                                 ORDER BY p.ad_soyad""")  # WHY: show full active personnel list in general mode.
                 return c.fetchall()
@@ -1155,13 +1157,13 @@ class Database:
                     tersane_params = [tersane_id]  # WHY: keep parameterized query for selected tersane.
             if year and month:
                 c.execute("""SELECT DISTINCT p.ad_soyad, p.maas, p.ekip_adi, p.ozel_durum, p.ekstra_odeme, p.yillik_izin_hakki, p.ise_baslangic, p.cikis_tarihi,
-                        COALESCE(p.ekstra_odeme_not, ''), COALESCE(p.avans_not, ''), COALESCE(p.yevmiyeci_mi, 0)
+                        COALESCE(p.ekstra_odeme_not, ''), COALESCE(p.avans_not, ''), COALESCE(p.yevmiyeci_mi, 0), COALESCE(p.gorevi, '')
                         FROM personel p INNER JOIN gunluk_kayit g ON p.ad_soyad = g.ad_soyad
                         WHERE strftime('%Y', g.tarih) = ? AND strftime('%m', g.tarih) = ?""" + tersane_filter +
                         " ORDER BY p.ad_soyad", tuple([str(year), f"{month:02d}"] + tersane_params))
             else:
                 c.execute("""SELECT p.ad_soyad, p.maas, p.ekip_adi, p.ozel_durum, p.ekstra_odeme, p.yillik_izin_hakki, p.ise_baslangic, p.cikis_tarihi,
-                                COALESCE(p.ekstra_odeme_not, ''), COALESCE(p.avans_not, ''), COALESCE(p.yevmiyeci_mi, 0) FROM personel p WHERE 1=1""" + tersane_filter +
+                                COALESCE(p.ekstra_odeme_not, ''), COALESCE(p.avans_not, ''), COALESCE(p.yevmiyeci_mi, 0), COALESCE(p.gorevi, '') FROM personel p WHERE 1=1""" + tersane_filter +
                                 " ORDER BY p.ad_soyad", tuple(tersane_params))
             return c.fetchall()
 
@@ -1180,12 +1182,25 @@ class Database:
             return res[0] if res else None
 
 
-    def update_personnel(self, ad_soyad, maas, ekip, ozel_durum=None, ekstra_odeme=0.0, yillik_izin_hakki=0.0, ise_baslangic=None, cikis_tarihi=None, ekstra_odeme_not=None, avans_not=None, yevmiyeci_mi=0, tersane_id=None):
+    def update_personnel(self, ad_soyad, maas, ekip, ozel_durum=None, ekstra_odeme=0.0, yillik_izin_hakki=0.0, ise_baslangic=None, cikis_tarihi=None, ekstra_odeme_not=None, avans_not=None, yevmiyeci_mi=0, tersane_id=None, gorevi=None):
         ad_soyad = ad_soyad.strip()
         with self.get_connection() as conn:
-            conn.execute("""INSERT OR REPLACE INTO personel (ad_soyad, maas, ekip_adi, ozel_durum, ekstra_odeme, yillik_izin_hakki, ise_baslangic, cikis_tarihi, ekstra_odeme_not, avans_not, yevmiyeci_mi, tersane_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (ad_soyad, maas, ekip, ozel_durum, ekstra_odeme, yillik_izin_hakki, ise_baslangic, cikis_tarihi, ekstra_odeme_not, avans_not, yevmiyeci_mi, tersane_id))
+            conn.execute("""
+                INSERT INTO personel (ad_soyad, maas, ekip_adi, ozel_durum, ekstra_odeme, yillik_izin_hakki,
+                    ise_baslangic, cikis_tarihi, ekstra_odeme_not, avans_not, yevmiyeci_mi, tersane_id, gorevi)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ad_soyad) DO UPDATE SET
+                    maas=excluded.maas, ekip_adi=excluded.ekip_adi, ozel_durum=excluded.ozel_durum,
+                    ekstra_odeme=excluded.ekstra_odeme, yillik_izin_hakki=excluded.yillik_izin_hakki,
+                    ise_baslangic=excluded.ise_baslangic, cikis_tarihi=excluded.cikis_tarihi,
+                    ekstra_odeme_not=excluded.ekstra_odeme_not, avans_not=excluded.avans_not,
+                    yevmiyeci_mi=excluded.yevmiyeci_mi, tersane_id=excluded.tersane_id,
+                    gorevi=CASE
+                        WHEN excluded.gorevi IS NOT NULL AND excluded.gorevi != '' THEN excluded.gorevi
+                        ELSE gorevi
+                    END""",
+                (ad_soyad, maas, ekip, ozel_durum, ekstra_odeme, yillik_izin_hakki,
+                 ise_baslangic, cikis_tarihi, ekstra_odeme_not, avans_not, yevmiyeci_mi, tersane_id, gorevi or ''))
             conn.commit()
         self._invalidate_cache(groups=['personnel_list'])  # WHY: personel listesi değişti, cache tazelenmeli.
         try: self.update_records_for_person(ad_soyad)
@@ -1193,6 +1208,19 @@ class Database:
             from core.app_logger import log_error
             log_error(f"Personel kayıt güncelleme hatası ({ad_soyad}): {e}")
 
+    def update_gorevi_bulk_if_empty(self, ad_gorev_pairs):
+        """Import sırasında gorevi boş olan personellere görevi yazar. Dolu olanları dokunmaz."""
+        if not ad_gorev_pairs:
+            return
+        with self.get_connection() as conn:
+            for ad, gorevi in ad_gorev_pairs:
+                if gorevi and gorevi.strip():
+                    conn.execute(
+                        "UPDATE personel SET gorevi=? WHERE TRIM(ad_soyad)=TRIM(?) AND (gorevi IS NULL OR TRIM(gorevi)='')",
+                        (gorevi.strip(), ad)
+                    )
+            conn.commit()
+        self._invalidate_cache(groups=['personnel_list'])
 
     def get_ekstra_aylik_bulk(self, yil, ay, tersane_id=None):
         """Verilen yıl/ay için tüm personelin aylık ekstra ödemelerini dict olarak döndürür.
