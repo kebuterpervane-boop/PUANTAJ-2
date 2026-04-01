@@ -829,22 +829,16 @@ class RaporlarPage(QWidget):
                     ).fetchall()
 
                 # Her personel için aylık FM toplamlarını çek
-                # SGK/denetim formatı — iki ayrı durum:
-                #   1. Normal mesai günleri: hesaplanan_mesai / 1.5  (sistem 1.5x uygulamış)
-                #   2. Tatil/Pazar çalışma:  7.5 saat sabit          (gerçek bir günlük çalışma)
-                TATIL_SQL = """
-                    SELECT
-                        COALESCE(SUM(CASE
-                            WHEN (aciklama LIKE '%Tatil%' OR aciklama LIKE '%Pazar%')
-                                 AND hesaplanan_mesai > 0
-                            THEN 7.5 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE
-                            WHEN (aciklama NOT LIKE '%Tatil%' AND aciklama NOT LIKE '%Pazar%')
-                            THEN hesaplanan_mesai ELSE 0 END), 0)
+                # SGK/denetim formatı — sadece Md.41 fazla mesai (tatil/pazar Md.47 kapsамında, sayılmaz)
+                # Normal mesai: hesaplanan_mesai / 1.5 (sistem zaten 1.5x uygulamış)
+                FM_SQL = """
+                    SELECT COALESCE(SUM(hesaplanan_mesai), 0)
                     FROM gunluk_kayit
                     WHERE ad_soyad=? AND tarih LIKE ?
+                      AND (aciklama NOT LIKE '%Tatil%' AND aciklama NOT LIKE '%Pazar%')
+                      AND hesaplanan_mesai > 0
                 """
-                TATIL_SQL_T = TATIL_SQL.replace(
+                FM_SQL_T = FM_SQL.replace(
                     "WHERE ad_soyad=? AND tarih LIKE ?",
                     "WHERE ad_soyad=? AND tarih LIKE ? AND tersane_id=?"
                 )
@@ -857,12 +851,11 @@ class RaporlarPage(QWidget):
                     for yil, ay in ay_listesi:
                         ay_str = f"{yil}-{ay:02d}"
                         if tersane_id and tersane_id > 0:
-                            row = c.execute(TATIL_SQL_T, (ad_soyad, f"{ay_str}%", tersane_id)).fetchone()
+                            row = c.execute(FM_SQL_T, (ad_soyad, f"{ay_str}%", tersane_id)).fetchone()
                         else:
-                            row = c.execute(TATIL_SQL, (ad_soyad, f"{ay_str}%")).fetchone()
-                        tatil_saat = row[0] if row else 0.0
-                        normal_raw = row[1] if row else 0.0
-                        fm_val = round(tatil_saat + (normal_raw / 1.5), 2) if (tatil_saat or normal_raw) else 0.0
+                            row = c.execute(FM_SQL, (ad_soyad, f"{ay_str}%")).fetchone()
+                        fm_raw = row[0] if row else 0.0
+                        fm_val = round(fm_raw / 1.5, 2) if fm_raw else 0.0
                         aylik_fm.append(fm_val)
                         toplam_fm += fm_val
                     tablo.append({
